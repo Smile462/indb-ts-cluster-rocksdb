@@ -117,43 +117,52 @@ std::vector<Vec> greedy_coreset(const std::vector<Vec>& candidates,
 
 QueryResult merge_units(const std::vector<PageMeta>& units, const Config& config, bool medoid,
                         const SampledSource& sampler) {
+  if (!medoid) return kshape_centers(units, config);
+  std::vector<Vec> candidates;
+  if (!sampler || !sampler(std::max(config.k * 32, 128), &candidates) || candidates.empty()) {
+    return QueryResult();
+  }
+  return medoid_centers(units, candidates, config);
+}
+
+}  // namespace
+
+QueryResult kshape_centers(const std::vector<PageMeta>& units, const Config& config) {
   QueryResult result;
   if (units.empty()) return result;
   const PageMeta merged = build_chunk_meta(units, config);
-  const int l = config.l;
-
-  if (medoid) {
-    std::vector<Vec> candidates;
-    if (!sampler || !sampler(std::max(config.k * 32, 128), &candidates) || candidates.empty()) {
-      return result;
-    }
-    std::vector<Vec> normalized;
-    normalized.reserve(candidates.size());
-    for (const Vec& seq : candidates) {
-      if (static_cast<int>(seq.size()) != l) continue;
-      normalized.push_back(zscore(seq));
-    }
-    if (normalized.empty()) return result;
-    Rng rng(config.seed);
-    result.centers = greedy_coreset(normalized, merged.ed_centroids, merged.ed_counts, config.k, l,
-                                    config.r, &rng);
-    return result;
-  }
-
   result.centers.resize(static_cast<size_t>(config.k));
   for (int c = 0; c < config.k; ++c) {
-    Mat sum(l, l);
-    for (int r = 0; r < l; ++r) {
-      for (int q = 0; q < l; ++q) sum.at(r, q) = merged.sum_matrix(c, r, q);
+    Mat sum(config.l, config.l);
+    for (int r = 0; r < config.l; ++r) {
+      for (int q = 0; q < config.l; ++q) sum.at(r, q) = merged.sum_matrix(c, r, q);
     }
-    Vec reference(static_cast<size_t>(l));
-    for (int r = 0; r < l; ++r) reference[static_cast<size_t>(r)] = merged.centroid(c, r);
+    Vec reference(static_cast<size_t>(config.l));
+    for (int r = 0; r < config.l; ++r) reference[static_cast<size_t>(r)] = merged.centroid(c, r);
     result.centers[static_cast<size_t>(c)] = extract_shape(sum, reference);
   }
   return result;
 }
 
-}  // namespace
+QueryResult medoid_centers(const std::vector<PageMeta>& units, const std::vector<Vec>& candidates,
+                           const Config& config) {
+  QueryResult result;
+  if (units.empty() || candidates.empty()) return result;
+  const PageMeta merged = build_chunk_meta(units, config);
+
+  std::vector<Vec> normalized;
+  normalized.reserve(candidates.size());
+  for (const Vec& seq : candidates) {
+    if (static_cast<int>(seq.size()) != config.l) continue;
+    normalized.push_back(zscore(seq));
+  }
+  if (normalized.empty()) return result;
+
+  Rng rng(config.seed);
+  result.centers = greedy_coreset(normalized, merged.ed_centroids, merged.ed_counts, config.k,
+                                  config.l, config.r, &rng);
+  return result;
+}
 
 std::vector<Vec> grid_subsequences(const Points& points, int l) {
   std::vector<Vec> out;

@@ -258,4 +258,11 @@ std::vector<Vec> grid_subsequences(const Points& points, int l);
 PageMeta correct_page(const PageMeta& meta, const Points& raw, int64_t t0, int64_t t1,
                       const Config& config, QueryStats* stats);
 
+// Merge helpers for adapters that perform page selection themselves and then
+// hand the chosen metadata records to the kernel. Both apply the same merge
+// rules as the built-in query paths.
+QueryResult kshape_centers(const std::vector<PageMeta>& units, const Config& config);
+QueryResult medoid_centers(const std::vector<PageMeta>& units, const std::vector<Vec>& candidates,
+                           const Config& config);
+
 }  // namespace indb
