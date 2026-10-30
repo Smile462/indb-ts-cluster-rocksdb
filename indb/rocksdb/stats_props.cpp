@@ -40,10 +40,10 @@ bool DecodePointKey(const rocksdb::Slice& key, uint32_t* ds, int64_t* ts) {
 
 const char* const kPageStatsProperty = "indb.page_stats";
 
-void PageMetaRegistry::Put(uint32_t ds, int64_t page_no, int64_t t_start, int64_t t_end,
-                           const std::string& encoded) {
+void PageMetaRegistry::PutPage(uint32_t ds, int64_t page_no, int64_t t_start, int64_t t_end,
+                               const std::string& encoded) {
   std::lock_guard<std::mutex> lock(mutex_);
-  auto& pages = by_dataset_[ds];
+  auto& pages = pages_[ds];
   for (PageMetaEntry& entry : pages) {
     if (entry.page_no == page_no) {
       entry.t_start = t_start;
@@ -58,56 +58,116 @@ void PageMetaRegistry::Put(uint32_t ds, int64_t page_no, int64_t t_start, int64_
   entry.t_end = t_end;
   entry.encoded = encoded;
   pages.push_back(std::move(entry));
-  std::sort(pages.begin(), pages.end(),
-            [](const PageMetaEntry& lhs, const PageMetaEntry& rhs) { return lhs.page_no < rhs.page_no; });
+  std::sort(pages.begin(), pages.end(), [](const PageMetaEntry& lhs, const PageMetaEntry& rhs) {
+    return lhs.page_no < rhs.page_no;
+  });
+}
+
+void PageMetaRegistry::PutChunk(uint32_t ds, int64_t t_start, int64_t t_end,
+                                const std::string& encoded) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  auto& chunks = chunks_[ds];
+  for (ChunkEntry& entry : chunks) {
+    if (entry.t_start == t_start && entry.t_end == t_end) {
+      entry.encoded = encoded;
+      return;
+    }
+  }
+  ChunkEntry entry;
+  entry.t_start = t_start;
+  entry.t_end = t_end;
+  entry.encoded = encoded;
+  chunks.push_back(std::move(entry));
 }
 
 void PageMetaRegistry::Clear(uint32_t ds) {
   std::lock_guard<std::mutex> lock(mutex_);
-  by_dataset_.erase(ds);
+  pages_.erase(ds);
+  chunks_.erase(ds);
 }
 
 size_t PageMetaRegistry::Size() const {
   std::lock_guard<std::mutex> lock(mutex_);
   size_t total = 0;
-  for (const auto& item : by_dataset_) total += item.second.size();
+  for (const auto& item : pages_) total += item.second.size();
   return total;
 }
 
-std::string PageMetaRegistry::Range(uint32_t ds, int64_t t0, int64_t t1) const {
+std::string PageMetaRegistry::BuildPayload(uint32_t ds, int64_t t0, int64_t t1) const {
   std::lock_guard<std::mutex> lock(mutex_);
-  const auto found = by_dataset_.find(ds);
-  if (found == by_dataset_.end()) return std::string();
 
   std::vector<const PageMetaEntry*> picked;
-  for (const PageMetaEntry& entry : found->second) {
-    if (entry.t_end < t0 || entry.t_start > t1) continue;
-    picked.push_back(&entry);
+  const auto page_it = pages_.find(ds);
+  if (page_it != pages_.end()) {
+    for (const PageMetaEntry& entry : page_it->second) {
+      if (entry.t_end < t0 || entry.t_start > t1) continue;
+      picked.push_back(&entry);
+    }
   }
   if (picked.empty()) return std::string();
-  return EncodePayload(picked);
+
+  // The chunk record belonging to this file: match on the range the importer
+  // registered. A file holds exactly one chunk, so this is unambiguous.
+  std::string chunk_encoded;
+  const auto chunk_it = chunks_.find(ds);
+  if (chunk_it != chunks_.end()) {
+    for (const ChunkEntry& entry : chunk_it->second) {
+      if (entry.t_start == t0 && entry.t_end == t1) {
+        chunk_encoded = entry.encoded;
+        break;
+      }
+    }
+    if (chunk_encoded.empty()) {
+      for (const ChunkEntry& entry : chunk_it->second) {
+        if (entry.t_start >= t0 && entry.t_end <= t1) {
+          chunk_encoded = entry.encoded;
+          break;
+        }
+      }
+    }
+  }
+
+  return EncodePayload(picked, chunk_encoded.empty() ? nullptr : &chunk_encoded);
 }
 
-std::string EncodePayload(const std::vector<const PageMetaEntry*>& entries) {
+std::string EncodePayload(const std::vector<const PageMetaEntry*>& pages,
+                          const std::string* chunk_encoded) {
   std::string out;
-  size_t total = 4;
-  for (const PageMetaEntry* entry : entries) total += 4 + entry->encoded.size();
+  size_t total = 1 + 4;
+  for (const PageMetaEntry* entry : pages) total += 4 + entry->encoded.size();
+  total += 4 + (chunk_encoded == nullptr ? 0 : chunk_encoded->size());
   out.reserve(total);
-  PutU32(&out, static_cast<uint32_t>(entries.size()));
-  for (const PageMetaEntry* entry : entries) {
+
+  out.push_back(static_cast<char>(kPayloadVersion));
+  PutU32(&out, static_cast<uint32_t>(pages.size()));
+  for (const PageMetaEntry* entry : pages) {
     PutU32(&out, static_cast<uint32_t>(entry->encoded.size()));
     out.append(entry->encoded);
+  }
+  if (chunk_encoded == nullptr) {
+    PutU32(&out, 0);
+  } else {
+    PutU32(&out, static_cast<uint32_t>(chunk_encoded->size()));
+    out.append(*chunk_encoded);
   }
   return out;
 }
 
-bool DecodePayload(const std::string& payload, std::vector<PageMeta>* pages, std::string* error) {
-  if (payload.size() < 4) {
+bool DecodePayload(const std::string& payload, std::vector<PageMeta>* pages, PageMeta* chunk,
+                   bool* has_chunk, std::string* error) {
+  if (has_chunk != nullptr) *has_chunk = false;
+  if (payload.size() < 5) {
     if (error) *error = "page stats payload is truncated";
     return false;
   }
-  const uint32_t count = GetU32(payload.data());
-  size_t offset = 4;
+  const uint8_t version = static_cast<uint8_t>(payload[0]);
+  if (version != 1 && version != kPayloadVersion) {
+    if (error) *error = "unsupported page stats payload version " + std::to_string(version);
+    return false;
+  }
+
+  const uint32_t count = GetU32(payload.data() + 1);
+  size_t offset = 5;
   pages->clear();
   pages->reserve(count);
   for (uint32_t i = 0; i < count; ++i) {
@@ -129,6 +189,28 @@ bool DecodePayload(const std::string& payload, std::vector<PageMeta>* pages, std
     }
     offset += length;
   }
+
+  // Version 1 payloads carry page records only.
+  if (version == 1) return true;
+
+  if (offset + 4 > payload.size()) {
+    if (error) *error = "page stats payload is truncated at chunk header";
+    return false;
+  }
+  const uint32_t chunk_length = GetU32(payload.data() + offset);
+  offset += 4;
+  if (chunk_length == 0) return true;
+  if (offset + chunk_length > payload.size()) {
+    if (error) *error = "page stats payload is truncated at chunk body";
+    return false;
+  }
+  try {
+    *chunk = decode_meta(std::string(payload.data() + offset, chunk_length));
+  } catch (const std::exception& failure) {
+    if (error) *error = std::string("chunk stats decode failed: ") + failure.what();
+    return false;
+  }
+  if (has_chunk != nullptr) *has_chunk = true;
   return true;
 }
 
@@ -150,8 +232,6 @@ rocksdb::Status IndbStatsCollector::AddUserKey(const rocksdb::Slice& key, const 
     max_ts_ = ts;
     return rocksdb::Status::OK();
   }
-  // A single file normally holds one series; keep the first dataset and
-  // widen the range regardless.
   if (ts < min_ts_) min_ts_ = ts;
   if (ts > max_ts_) max_ts_ = ts;
   return rocksdb::Status::OK();
@@ -159,18 +239,18 @@ rocksdb::Status IndbStatsCollector::AddUserKey(const rocksdb::Slice& key, const 
 
 rocksdb::Status IndbStatsCollector::Finish(rocksdb::UserCollectedProperties* properties) {
   if (!seen_ || registry_ == nullptr) return rocksdb::Status::OK();
-  const std::string payload = registry_->Range(ds_, min_ts_, max_ts_);
+  const std::string payload = registry_->BuildPayload(ds_, min_ts_, max_ts_);
   if (payload.empty()) return rocksdb::Status::OK();
   (*properties)[kPageStatsProperty] = payload;
   return rocksdb::Status::OK();
 }
 
-bool DecodeTableProperties(const rocksdb::TableProperties& properties,
-                           std::vector<PageMeta>* pages) {
+bool DecodeTableProperties(const rocksdb::TableProperties& properties, std::vector<PageMeta>* pages,
+                           PageMeta* chunk, bool* has_chunk) {
   const auto found = properties.user_collected_properties.find(kPageStatsProperty);
   if (found == properties.user_collected_properties.end()) return false;
   std::string error;
-  return DecodePayload(found->second, pages, &error);
+  return DecodePayload(found->second, pages, chunk, has_chunk, &error);
 }
 
 }  // namespace indb

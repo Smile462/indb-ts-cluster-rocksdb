@@ -123,15 +123,18 @@ identical centres; `indb_tests` asserts this. Measured on the Air series
 
 | | `cf` | `props` |
 |---|---:|---:|
-| import | 43.7 s | 43.9 s |
-| database size | 65.5 MB | 59.5 MB |
-| `kshape` page, open | 0.007 s | 0.019 s |
-| `kshape` page, query | 0.232 s | 0.230 s |
-| `kshape` chunk, open | 0.007 s | 0.018 s |
-| `kshape` chunk, query | 0.215 s | 0.210 s |
+| import | 43.7 s | 46.4 s |
+| database size | 65.5 MB | 65.3 MB |
+| `kshape` page, open | 0.043 s | 0.019 s |
+| `kshape` page, query | 0.252 s | 0.221 s |
+| `kshape` chunk, open | 0.007 s | 0.019 s |
+| `kshape` chunk, query | 0.212 s | 0.197 s |
 
-`props` is smaller because chunk aggregates are derived from the page records
-at query time instead of being stored a second time.
+Each properties payload carries the page records of the file plus the chunk
+record that summarises them, so a chunk level query reads the chunk record
+instead of merging pages, and no record is ever derived at query time. The two
+layouts therefore hold the same bytes, which is why their sizes now match; the
+column family layout still keeps a separate index to locate pages by time.
 
 Open and query time are reported separately on purpose. Opening a database can
 touch table metadata, so folding it into one number would hide where the time

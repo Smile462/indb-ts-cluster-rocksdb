@@ -1,4 +1,4 @@
-//  Copyright (c) 2026 The in-database time-series clustering authors.
+﻿//  Copyright (c) 2026 The in-database time-series clustering authors.
 //  This source code is licensed under both the GPLv2 (found in the
 //  COPYING file in the root directory) and Apache 2.0 License
 //  (found in the LICENSE.Apache file in the root directory).
@@ -52,6 +52,8 @@ void Store::ImportPointsToTableProperties(uint32_t ds, const Points& points, con
   int64_t page_no = 0;
   int64_t chunk_no = 0;
   int64_t pages_in_chunk = 0;
+  std::vector<PageMeta> chunk_pages;
+  chunk_pages.reserve(static_cast<size_t>(config.chunk_pages));
 
   while (offset < total) {
     const size_t begin = offset;
@@ -72,7 +74,8 @@ void Store::ImportPointsToTableProperties(uint32_t ds, const Points& points, con
     const uint64_t page_seed =
         config.seed ^ (static_cast<uint64_t>(page_no + 1) * 0x9E3779B97F4A7C15ULL);
     const PageMeta meta = build_page_meta(page, config, page_seed);
-    registry_->Put(ds, page_no, meta.t_start, meta.t_end, encode_meta(meta));
+    registry_->PutPage(ds, page_no, meta.t_start, meta.t_end, encode_meta(meta));
+    chunk_pages.push_back(meta);
 
     ++page_no;
     ++pages_in_chunk;
@@ -81,9 +84,14 @@ void Store::ImportPointsToTableProperties(uint32_t ds, const Points& points, con
     // Seal the file at chunk boundaries so one SST holds one chunk. Flush
     // throws on failure, so a file that failed to be written is never counted.
     if (pages_in_chunk >= config.chunk_pages || offset >= total) {
+      // The chunk record is stored in the same properties block as the pages it
+      // summarises, so a chunk level query reads it instead of recomputing it.
+      const PageMeta chunk = build_chunk_meta(chunk_pages, config);
+      registry_->PutChunk(ds, chunk.t_start, chunk.t_end, encode_meta(chunk));
       Flush();
       ++chunk_no;
       pages_in_chunk = 0;
+      chunk_pages.clear();
     }
   }
 
@@ -120,17 +128,26 @@ std::vector<Store::SstGroup> Store::LoadPropertyGroups(uint32_t ds, int64_t t0, 
     }
 
     std::vector<PageMeta> pages;
+    PageMeta chunk;
+    bool has_chunk = false;
     std::string error;
-    if (!DecodePayload(found->second, &pages, &error)) {
+    if (!DecodePayload(found->second, &pages, &chunk, &has_chunk, &error)) {
       throw AlgorithmError("cannot decode page statistics of table " + entry.first + ": " + error);
     }
     if (pages.empty()) {
       throw AlgorithmError("table " + entry.first + " has an empty page statistics payload");
     }
+    if (!has_chunk) {
+      // A chunk record is always written with its pages, so its absence means
+      // the payload was produced by an older build or was damaged.
+      throw AlgorithmError("table " + entry.first + " carries no chunk record");
+    }
     if (bytes != nullptr) *bytes += static_cast<int64_t>(found->second.size());
 
     SstGroup group;
     group.pages = std::move(pages);
+    group.chunk = std::move(chunk);
+    group.has_chunk = true;
     group.t_start = group.pages.front().t_start;
     group.t_end = group.pages.back().t_end;
     groups.push_back(std::move(group));
@@ -200,7 +217,7 @@ QueryResult Store::QueryFromProperties(const QueryOptions& options, const Config
       const double ratio = overlap_ratio(span, options.t0, options.t1);
       if (ratio <= 0.0) continue;
       if (ratio >= config.theta_chunk) {
-        units.push_back(build_chunk_meta(group.pages, config));
+        units.push_back(group.chunk);
         ++stats.chunks_meta_used;
         continue;
       }

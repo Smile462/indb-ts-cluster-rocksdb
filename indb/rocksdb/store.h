@@ -137,6 +137,8 @@ class Store {
   // Page records read out of the SST meta blocks, grouped by file.
   struct SstGroup {
     std::vector<PageMeta> pages;
+    PageMeta chunk;          // chunk record stored alongside its pages
+    bool has_chunk = false;
     int64_t t_start = 0;
     int64_t t_end = 0;
   };
