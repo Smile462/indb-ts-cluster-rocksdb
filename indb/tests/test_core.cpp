@@ -180,7 +180,7 @@ void TestStoreEndToEnd() {
     options.t1 = 1919;
     const indb::QueryResult again = store->KShape(options);
     Check(static_cast<int>(again.centers.size()) == 2, "reopen center count");
-    Check(again.stats.meta_bytes_read > 0, "reopen read metadata from disk");
+    Check(again.stats.metadata_payload_bytes > 0, "reopen read metadata from disk");
   }
 
   bool threw = false;
@@ -264,11 +264,84 @@ void TestPropertyStorageParity() {
 
   Check(worst_difference(cf_page, props_page) == 0.0, "page level parity across storage modes");
   Check(worst_difference(cf_chunk, props_chunk) == 0.0, "chunk level parity across storage modes");
-  Check(props_page.stats.meta_bytes_read > 0, "properties mode reports metadata bytes");
+  {
+    // Reopening must read the records back from the files, not from the memory
+    // of the importing process.
+    std::unique_ptr<indb::Store> reopened = indb::Store::Open(props_path.string());
+    const indb::QueryResult after_reopen = reopened->KShape(options);
+    Check(worst_difference(props_page, after_reopen) == 0.0,
+          "properties survive close and reopen");
+  }
+  Check(props_page.stats.metadata_payload_bytes > 0, "properties mode reports metadata bytes");
   Check(props_page.stats.pages_meta_used > 0, "properties mode used page records");
 
   std::filesystem::remove_all(cf_path);
   std::filesystem::remove_all(props_path);
+}
+// A medoid query must only sample pages that overlap the requested range: the
+// two pages here hold opposite shapes, so a centre drawn from page 1 would not
+// match any subsequence of page 0.
+void TestMedoidRangeIsRespected() {
+  const std::filesystem::path db_path = "E:/tmp/indb_test_medoid_range";
+  std::filesystem::remove_all(db_path);
+
+  indb::Config config;
+  config.k = 2;
+  config.l = 16;
+  config.iter_build = 5;
+  config.iter_raw = 5;
+  config.page_points = 240;
+  config.chunk_pages = 1;
+  config.r = 0.5;
+
+  indb::Points points;
+  for (int i = 0; i < 480; ++i) {
+    points.ts.push_back(i);
+    const double t = static_cast<double>(i % 16) / 15.0;
+    points.values.push_back(i < 240 ? t : 1.0 - t);
+  }
+
+  std::unique_ptr<indb::Store> store = indb::Store::Create(db_path.string());
+  store->ImportPoints(3, points, config, indb::MetaStorage::kTableProperties);
+  store->Flush();
+
+  indb::QueryOptions options;
+  options.ds = 3;
+  options.t0 = 0;
+  options.t1 = 239;
+  options.level = indb::Level::Page;
+  const indb::QueryResult result = store->MShape(options);
+  Check(result.centers.size() == 2, "medoid range returns k centers");
+
+  indb::Points page0;
+  for (int i = 0; i < 240; ++i) {
+    page0.ts.push_back(i);
+    page0.values.push_back(points.values[static_cast<size_t>(i)]);
+  }
+  const std::vector<indb::Vec> allowed = indb::grid_subsequences(page0, config.l);
+  Check(!allowed.empty(), "page 0 has subsequences");
+
+  double worst = 0.0;
+  for (const indb::Vec& center : result.centers) {
+    double best = 1e300;
+    for (const indb::Vec& raw : allowed) {
+      const indb::Vec candidate = indb::zscore(raw);
+      double same = 0.0;
+      double flipped = 0.0;
+      for (size_t i = 0; i < candidate.size() && i < center.size(); ++i) {
+        same = std::max(same, std::fabs(candidate[i] - center[i]));
+        flipped = std::max(flipped, std::fabs(candidate[i] + center[i]));
+      }
+      best = std::min(best, std::min(same, flipped));
+    }
+    if (best > worst) worst = best;
+  }
+  Check(worst < 1e-9, "medoids come from the queried page only");
+
+  // Release the database before removing the directory: Windows keeps the
+  // files locked while the handle is open.
+  store.reset();
+  std::filesystem::remove_all(db_path);
 }
 }  // namespace
 
@@ -281,7 +354,7 @@ int main() {
   };
   const Case cases[] = {
       {"zscore", TestZScore}, {"fft", TestFft},   {"eigen", TestEigen},
-      {"meta", TestMetaRoundTrip}, {"store", TestStoreEndToEnd}, {"props", TestPropertyStorageParity},
+      {"meta", TestMetaRoundTrip}, {"store", TestStoreEndToEnd}, {"props", TestPropertyStorageParity}, {"medoid_range", TestMedoidRangeIsRespected},
   };
   for (const Case& item : cases) {
     std::printf("[ RUN  ] %s\n", item.name);

@@ -1,4 +1,4 @@
-//  Copyright (c) 2026 The in-database time-series clustering authors.
+﻿//  Copyright (c) 2026 The in-database time-series clustering authors.
 //  This source code is licensed under both the GPLv2 (found in the
 //  COPYING file in the root directory) and Apache 2.0 License
 //  (found in the LICENSE.Apache file in the root directory).
@@ -235,7 +235,7 @@ struct QueryStats {
   int64_t chunks_descended = 0;
   int64_t units_merged = 0;
   int64_t raw_points_read = 0;
-  int64_t meta_bytes_read = 0;
+  int64_t metadata_payload_bytes = 0;
 };
 
 struct QueryResult {

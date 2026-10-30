@@ -193,6 +193,10 @@ std::unique_ptr<Store> Store::Create(const std::string& path) {
   std::vector<rocksdb::ColumnFamilyDescriptor> descriptors;
   for (const std::string& name : AllColumnFamilies()) {
     rocksdb::ColumnFamilyOptions cf_options;
+    // The experiment runs on a frozen layout: with compaction disabled no SST
+    // is ever rewritten, so the page records written at import time cannot be
+    // replaced by a file that no longer carries them.
+    cf_options.disable_auto_compactions = true;
     if (name == kCfPoints) {
       cf_options.table_properties_collector_factories.push_back(
           std::make_shared<IndbStatsCollectorFactory>(store->registry_));
@@ -228,8 +232,13 @@ std::unique_ptr<Store> Store::Open(const std::string& path) {
   }
   rocksdb::Options options;
   options.create_if_missing = false;
+  // Queries never write, and a read only open cannot run compaction. Combined
+  // with disable_auto_compactions at creation time this guarantees the files
+  // opened by a query are exactly the ones the import produced.
+  options.max_open_files = 512;
   std::unique_ptr<rocksdb::DB> db;
-  const rocksdb::Status status = rocksdb::DB::Open(options, path, descriptors, &store->handles_, &db);
+  const rocksdb::Status status =
+      rocksdb::DB::OpenForReadOnly(options, path, descriptors, &store->handles_, &db);
   if (!status.ok()) throw AlgorithmError("open failed: " + status.ToString());
   store->db_ = std::move(db);
   return store;
@@ -246,7 +255,8 @@ rocksdb::ColumnFamilyHandle* Store::cf_for(const std::string& name) {
 
 void Store::Flush() {
   for (rocksdb::ColumnFamilyHandle* handle : handles_) {
-    db_->Flush(rocksdb::FlushOptions(), handle);
+    const rocksdb::Status status = db_->Flush(rocksdb::FlushOptions(), handle);
+    if (!status.ok()) throw AlgorithmError("flush failed: " + status.ToString());
   }
 }
 
@@ -550,6 +560,54 @@ Store::ChunkRecord Store::ReadChunkMeta(uint32_t ds, int64_t chunk_no, int64_t* 
   return record;
 }
 
+std::vector<Vec> Store::SampleCandidates(const std::vector<PageMeta>& pages, int64_t t0, int64_t t1,
+                                         const Config& config,
+                                         const std::function<Points(const PageMeta&)>& loader,
+                                         QueryStats* stats) const {
+  std::vector<Vec> collected;
+  if (pages.empty()) return collected;
+
+  // Only pages overlapping the queried range may contribute candidates: a
+  // query must never sample points from outside its range.
+  std::vector<const PageMeta*> candidates;
+  std::vector<double> weights;
+  double total_weight = 0.0;
+  for (const PageMeta& meta : pages) {
+    if (overlap_ratio(meta, t0, t1) <= 0.0) continue;
+    const double weight = static_cast<double>(std::max<int64_t>(1, meta.count));
+    candidates.push_back(&meta);
+    weights.push_back(weight);
+    total_weight += weight;
+  }
+  if (candidates.empty() || total_weight <= 0.0) return collected;
+
+  const int limit = std::max(config.k * 32, 128);
+  std::mt19937 generator(static_cast<uint32_t>(config.seed));
+  std::uniform_real_distribution<double> pick(0.0, total_weight);
+  std::uniform_real_distribution<double> coin(0.0, 1.0);
+
+  for (int attempt = 0; attempt < limit * 8 && static_cast<int>(collected.size()) < limit;
+       ++attempt) {
+    const double value = pick(generator);
+    int index = 0;
+    double accumulated = 0.0;
+    for (size_t i = 0; i < candidates.size(); ++i) {
+      accumulated += weights[i];
+      if (value <= accumulated) {
+        index = static_cast<int>(i);
+        break;
+      }
+    }
+    if (coin(generator) > config.r) continue;
+    const Points raw = loader(*candidates[static_cast<size_t>(index)]);
+    if (stats != nullptr) stats->raw_points_read += static_cast<int64_t>(raw.size());
+    for (const Vec& sequence : grid_subsequences(raw, config.l)) {
+      if (static_cast<int>(collected.size()) >= limit) break;
+      collected.push_back(sequence);
+    }
+  }
+  return collected;
+}
 Config Store::ResolveConfig(const QueryOptions& options, const DatasetInfo& info) const {
   Config config = info.config;
   if (options.k > 0) config.k = options.k;
@@ -618,7 +676,7 @@ QueryResult Store::KShape(const QueryOptions& options) {
 
   QueryResult result =
       kshape_query(chunks, pages, options.t0, options.t1, config, options.level, loader);
-  result.stats.meta_bytes_read = meta_bytes;
+  result.stats.metadata_payload_bytes = meta_bytes;
   return result;
 }
 
@@ -657,47 +715,30 @@ QueryResult Store::MShape(const QueryOptions& options) {
     return out->size() > 0;
   };
 
-  // Medoid-Shape samples chunks by size, then pages, then subsequences, the
-  // same order the reference implementation uses.
-  std::mt19937 sampler(static_cast<uint32_t>(config.seed));
-  const SampledSource source = [this, options, config, page_numbers, &sampler](
-                                   int max_sequences, std::vector<Vec>* out) {
-    std::vector<int64_t> candidate_chunks = page_numbers;
-    std::vector<double> weights;
-    weights.reserve(candidate_chunks.size());
-    double total_weight = 0.0;
-    for (int64_t page_no : candidate_chunks) {
-      const Points page = ReadPage(options.ds, page_no);
-      const double weight = static_cast<double>(std::max<size_t>(1, page.size()));
-      weights.push_back(weight);
-      total_weight += weight;
-    }
-    if (total_weight <= 0.0) return false;
-
-    std::uniform_real_distribution<double> uniform(0.0, total_weight);
-    std::vector<Vec> collected;
-    for (int attempt = 0; attempt < 4 * max_sequences && static_cast<int>(collected.size()) < max_sequences;
-         ++attempt) {
-      // Page level sampling: keep a page with probability r.
-      std::uniform_real_distribution<double> coin(0.0, 1.0);
-      const int index = static_cast<int>(uniform(sampler) / total_weight * weights.size());
-      if (index >= static_cast<int>(candidate_chunks.size())) continue;
-      if (coin(sampler) > config.r) continue;
-      const Points page = ReadPage(options.ds, candidate_chunks[static_cast<size_t>(index)]);
-      const std::vector<Vec> seqs = grid_subsequences(page, config.l);
-      for (const Vec& seq : seqs) {
-        if (static_cast<int>(collected.size()) >= max_sequences) break;
-        collected.push_back(seq);
-      }
-    }
+  // Medoid-Shape samples subsequences from the pages that overlap the query
+  // range, using the sampler shared with the table properties storage mode.
+  std::vector<PageMeta> page_meta;
+  page_meta.reserve(pages.size());
+  for (const PageRef& ref : pages) page_meta.push_back(ref.meta);
+  const SampledSource source = [this, options, config, page_meta](int max_sequences,
+                                                                  std::vector<Vec>* out) {
+    std::vector<Vec> collected = SampleCandidates(
+        page_meta, options.t0, options.t1, config,
+        [this, options](const PageMeta& meta) {
+          return ReadRange(options.ds, meta.t_start, meta.t_end);
+        },
+        nullptr);
     if (collected.empty()) return false;
+    if (static_cast<int>(collected.size()) > max_sequences) {
+      collected.resize(static_cast<size_t>(max_sequences));
+    }
     *out = std::move(collected);
     return true;
   };
 
   QueryResult result =
       mshape_query(chunks, pages, options.t0, options.t1, config, options.level, loader, source);
-  result.stats.meta_bytes_read = meta_bytes;
+  result.stats.metadata_payload_bytes = meta_bytes;
   return result;
 }
 

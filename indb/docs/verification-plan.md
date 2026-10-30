@@ -222,14 +222,24 @@ SELECT indb_tsc_build(1, 3, 166, 10240, 8, 30, 24301);
 | `mshape_raw` | 0.595 s | 576 ms |
 | 库体积 | 66.1 MB | — |
 
-另外用 Air 对比了两种 RocksDB 存储布局（`cf` 与 `props`），结果逐位相同：
+另外用 Air 对比了两种 RocksDB 存储布局（`cf` 与 `props`），结果逐位相同。
+计时在冻结布局、只读打开的条件下重测，open 与 query 分开记录：
 
 | Air（714962 点） | `cf` | `props` |
 |---|---:|---:|
-| 导入 | 43.5 s | 43.4 s |
-| 库体积 | 65.3 MB | 59.5 MB |
-| `kshape` page | 0.362 s | 0.286 s |
-| `kshape` chunk | 0.269 s | 0.268 s |
+| 导入 | 43.7 s | 43.9 s |
+| 库体积 | 65.5 MB | 59.5 MB |
+| `kshape` page，open | 0.007 s | 0.019 s |
+| `kshape` page，query | 0.232 s | 0.230 s |
+| `kshape` chunk，open | 0.007 s | 0.018 s |
+| `kshape` chunk，query | 0.215 s | 0.210 s |
+
+两种布局的查询耗时基本相同，说明"统计放在独立列族还是放在 SST 的 properties
+块"不改变加速结论；差别只体现在库体积（`props` 少存一份块级聚合）。
+
+**计时口径**：`query` 是数据库打开之后、从第一次调用到最后一次调用的时间。
+打开阶段可能读取表元数据，因此单独记录为 `open`，CLI 每次输出 `open`/`query`/`total`
+三个值。所有正式测量都应报告这三项，而不是只报一个总数。
 
 一致性：
 

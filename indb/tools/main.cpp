@@ -73,12 +73,12 @@ void PrintStats(const QueryResult& result) {
   std::fprintf(stderr,
                "stats pages_considered=%lld pages_meta=%lld pages_corrected=%lld "
                "chunks_meta=%lld chunks_descended=%lld units_merged=%lld "
-               "raw_points=%lld meta_bytes=%lld\n",
+               "raw_points=%lld metadata_payload_bytes=%lld\n",
                static_cast<long long>(s.pages_considered), static_cast<long long>(s.pages_meta_used),
                static_cast<long long>(s.pages_corrected), static_cast<long long>(s.chunks_meta_used),
                static_cast<long long>(s.chunks_descended), static_cast<long long>(s.units_merged),
                static_cast<long long>(s.raw_points_read),
-               static_cast<long long>(s.meta_bytes_read));
+               static_cast<long long>(s.metadata_payload_bytes));
 }
 
 int RunImport(int argc, char** argv) {
@@ -182,7 +182,9 @@ int RunQuery(int argc, char** argv) {
   }
   options.level = level == "chunk" ? Level::Chunk : Level::Page;
 
+  const auto openBegin = std::chrono::steady_clock::now();
   std::unique_ptr<Store> store = Store::Open(db_path);
+  const auto openEnd = std::chrono::steady_clock::now();
   QueryResult result;
   const auto begin = std::chrono::steady_clock::now();
   for (int i = 0; i < repeat; ++i) {
@@ -200,10 +202,17 @@ int RunQuery(int argc, char** argv) {
     }
   }
   const auto end = std::chrono::steady_clock::now();
-  const double seconds = std::chrono::duration<double>(end - begin).count() / repeat;
+  const double openSeconds = std::chrono::duration<double>(openEnd - openBegin).count();
+  const double querySeconds = std::chrono::duration<double>(end - begin).count() / repeat;
+  const double totalSeconds = openSeconds + querySeconds;
 
-  std::fprintf(stderr, "method=%s level=%s centers=%zu elapsed=%.6f s\n", method.c_str(),
-               level.c_str(), result.centers.size(), seconds);
+  // Opening a database can read table properties (all files are opened when
+  // max_open_files is unlimited), so the open and query phases are reported
+  // separately instead of folded into one number.
+  std::fprintf(stderr,
+               "method=%s level=%s centers=%zu open=%.6f s query=%.6f s total=%.6f s\n",
+               method.c_str(), level.c_str(), result.centers.size(), openSeconds, querySeconds,
+               totalSeconds);
   PrintStats(result);
   PrintCenters(result, out);
   return 0;

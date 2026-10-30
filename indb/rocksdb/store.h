@@ -10,6 +10,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -132,6 +133,14 @@ class Store {
     int64_t t_end = 0;
   };
   std::vector<SstGroup> LoadPropertyGroups(uint32_t ds, int64_t t0, int64_t t1, int64_t* bytes) const;
+
+  // Shared Medoid-Shape candidate sampling. Only pages overlapping [t0, t1]
+  // are considered, so a query never reads points outside its range. Both
+  // storage modes call this, so the sampling policy cannot drift apart.
+  std::vector<Vec> SampleCandidates(const std::vector<PageMeta>& pages, int64_t t0, int64_t t1,
+                                    const Config& config,
+                                    const std::function<Points(const PageMeta&)>& loader,
+                                    QueryStats* stats) const;
 
   // Query path used when the dataset stores its metadata in table properties.
   QueryResult QueryFromProperties(const QueryOptions& options, const Config& config, bool medoid);

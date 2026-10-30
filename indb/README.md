@@ -109,13 +109,27 @@ identical centres; `indb_tests` asserts this. Measured on the Air series
 
 | | `cf` | `props` |
 |---|---:|---:|
-| import | 43.5 s | 43.4 s |
-| database size | 65.3 MB | 59.5 MB |
-| `kshape` page | 0.362 s | 0.286 s |
-| `kshape` chunk | 0.269 s | 0.268 s |
+| import | 43.7 s | 43.9 s |
+| database size | 65.5 MB | 59.5 MB |
+| `kshape` page, open | 0.007 s | 0.019 s |
+| `kshape` page, query | 0.232 s | 0.230 s |
+| `kshape` chunk, open | 0.007 s | 0.018 s |
+| `kshape` chunk, query | 0.215 s | 0.210 s |
 
 `props` is smaller because chunk aggregates are derived from the page records
 at query time instead of being stored a second time.
+
+Open and query time are reported separately on purpose. Opening a database can
+touch table metadata, so folding it into one number would hide where the time
+went. The `query` figures are the time from the first call to the last, on an
+already opened database; the CLI prints `open`, `query` and `total` for every
+run.
+
+Layout is frozen: automatic compaction is disabled at creation and queries open
+the database read only. No file is ever rewritten, so the mapping from files to
+chunks stays valid. If a file that overlaps a query nevertheless carries no page
+records, the query fails instead of aggregating over the gap, and the loader
+also rejects overlapping or non contiguous page ranges.
 ## Query semantics
 
 - Subsequences are aligned to the absolute grid `[i*l, (i+1)*l)`.
