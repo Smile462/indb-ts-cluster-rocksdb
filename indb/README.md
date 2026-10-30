@@ -59,6 +59,20 @@ cmake -S . -B E:/build/rocksdb -G "Visual Studio 17 2022" -A x64 `
 cmake --build E:/build/rocksdb --config Release --target rocksdb -- /m:24
 ```
 
+## Experiment configuration
+
+The formal measurements run at **page level**. Both metadata paths are called
+with `level=page`, which is the default in the CLI and in the PostgreSQL
+functions:
+
+- aggregation uses one page record per page and corrects only the pages that
+  straddle a query boundary;
+- Medoid-Shape samples candidate subsequences from the pages that overlap the
+  query range, taking each page's full contents as the reference implementation
+  does.
+
+Chunk level remains available and is exercised by the tests, but it is not part
+of the measured matrix.
 ## Storage layout
 
 | Column family | Key | Value |
