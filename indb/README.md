@@ -194,3 +194,22 @@ Centres are written to stdout as `k l` followed by `k` rows of `l` values.
 
 See `docs/algorithm-notes.md` for the deliberate deviations from the IoTDB
 reference.
+
+## Working with a clone
+
+This repository has been edited from more than one tool at a time. That once
+left a clone whose `main` pointed at an older commit while its working tree
+already held the newer changes, which is easy to misread as lost work. Every
+change should therefore follow the same sequence:
+
+1. `git fetch origin --prune` and look at `git status` before starting;
+2. commit your work;
+3. push, then immediately bring the local branch up to date
+   (`git checkout main && git merge --ff-only origin/main`), so a clone is never
+   left behind the remote;
+4. delete any temporary branch you created; a branch that was pushed to `main`
+   under another name is easily mistaken for unmerged work.
+
+The working clones are configured with `pull.ff = only`, `fetch.prune = true`
+and `push.default = simple`, so a pull can never create a merge commit by
+accident and a push cannot land on the wrong branch.
