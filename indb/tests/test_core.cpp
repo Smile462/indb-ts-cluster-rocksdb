@@ -100,6 +100,29 @@ void TestMetaRoundTrip() {
   Check(threw, "mismatched parameters are rejected");
 }
 
+void TestCorrectedMetaRoundTrip() {
+  indb::Points points;
+  for (int i = 3; i < 303; ++i) {
+    points.ts.push_back(i);
+    points.values.push_back(std::sin(0.13 * i) + 0.2 * std::cos(0.7 * i));
+  }
+  indb::Config config;
+  config.k = 2;
+  config.l = 10;
+  config.iter_build = 5;
+  const indb::PageMeta original = indb::build_page_meta(points, config, 12345);
+  const indb::PageMeta corrected = indb::correct_page(original, points, 13, 182, config, nullptr);
+  Check(corrected.n_seq < original.n_seq, "partial correction removes sequences");
+  Check(corrected.idx.size() == static_cast<size_t>(corrected.n_seq), "corrected idx length");
+  Check(corrected.ed_idx.size() == static_cast<size_t>(corrected.n_seq), "corrected ed_idx length");
+  const std::string bytes = indb::encode_meta(corrected);
+  const indb::PageMeta decoded = indb::decode_meta(bytes);
+  Check(decoded.head_extra == corrected.head_extra, "corrected head survives serialization");
+  Check(decoded.tail_extra == corrected.tail_extra, "corrected tail survives serialization");
+  Check(decoded.ed_idx == corrected.ed_idx, "corrected labels survive serialization");
+  Check(indb::encode_meta(decoded) == bytes, "corrected metadata exact roundtrip");
+}
+
 indb::Points MakeSeries(int points, int l) {
   indb::Points out;
   for (int i = 0; i < points; ++i) {
@@ -393,7 +416,7 @@ int main() {
   };
   const Case cases[] = {
       {"zscore", TestZScore}, {"fft", TestFft},   {"eigen", TestEigen},
-      {"meta", TestMetaRoundTrip}, {"store", TestStoreEndToEnd}, {"props", TestPropertyStorageParity}, {"medoid_range", TestMedoidRangeIsRespected},
+      {"meta", TestMetaRoundTrip}, {"corrected_meta", TestCorrectedMetaRoundTrip}, {"store", TestStoreEndToEnd}, {"props", TestPropertyStorageParity}, {"medoid_range", TestMedoidRangeIsRespected},
   };
   for (const Case& item : cases) {
     std::printf("[ RUN  ] %s\n", item.name);
