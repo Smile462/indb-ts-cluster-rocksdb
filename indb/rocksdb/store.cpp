@@ -1,8 +1,9 @@
-//  Copyright (c) 2026 The in-database time-series clustering authors.
+﻿//  Copyright (c) 2026 The in-database time-series clustering authors.
 //  This source code is licensed under both the GPLv2 (found in the
 //  COPYING file in the root directory) and Apache 2.0 License
 //  (found in the LICENSE.Apache file in the root directory).
 
+#include "rocksdb/stats_props.h"
 #include "rocksdb/store.h"
 
 #include <algorithm>
@@ -89,11 +90,12 @@ std::string EncodeDataset(const DatasetInfo& info) {
   PutI64(&out, info.n_points);
   PutI64(&out, info.n_pages);
   PutI64(&out, info.n_chunks);
+  PutU32(&out, static_cast<uint32_t>(info.storage));
   return out;
 }
 
 DatasetInfo DecodeDataset(const std::string& bytes) {
-  if (bytes.size() < 4 * 8 + 8 + 5 * 8) throw AlgorithmError("catalog record too short");
+  if (bytes.size() < 88) throw AlgorithmError("catalog record too short");
   const char* p = bytes.data();
   DatasetInfo info;
   info.ds = GetU32(p);
@@ -111,6 +113,7 @@ DatasetInfo DecodeDataset(const std::string& bytes) {
   info.n_points = GetI64(p + 60);
   info.n_pages = GetI64(p + 68);
   info.n_chunks = GetI64(p + 76);
+  info.storage = static_cast<MetaStorage>(GetU32(p + 84));
   return info;
 }
 
@@ -186,9 +189,15 @@ std::unique_ptr<Store> Store::Create(const std::string& path) {
   options.compression = rocksdb::kNoCompression;
   options.max_open_files = 4096;
 
+  store->registry_ = std::make_shared<PageMetaRegistry>();
   std::vector<rocksdb::ColumnFamilyDescriptor> descriptors;
   for (const std::string& name : AllColumnFamilies()) {
-    descriptors.emplace_back(name, rocksdb::ColumnFamilyOptions());
+    rocksdb::ColumnFamilyOptions cf_options;
+    if (name == kCfPoints) {
+      cf_options.table_properties_collector_factories.push_back(
+          std::make_shared<IndbStatsCollectorFactory>(store->registry_));
+    }
+    descriptors.emplace_back(name, cf_options);
   }
   std::unique_ptr<rocksdb::DB> db;
   const rocksdb::Status status =
@@ -207,9 +216,15 @@ std::unique_ptr<Store> Store::Open(const std::string& path) {
     const rocksdb::Status status = rocksdb::DB::ListColumnFamilies(options, path, &names);
     if (!status.ok()) throw AlgorithmError("cannot list column families: " + status.ToString());
   }
+  store->registry_ = std::make_shared<PageMetaRegistry>();
   std::vector<rocksdb::ColumnFamilyDescriptor> descriptors;
   for (const std::string& name : names) {
-    descriptors.emplace_back(name, rocksdb::ColumnFamilyOptions());
+    rocksdb::ColumnFamilyOptions cf_options;
+    if (name == kCfPoints) {
+      cf_options.table_properties_collector_factories.push_back(
+          std::make_shared<IndbStatsCollectorFactory>(store->registry_));
+    }
+    descriptors.emplace_back(name, cf_options);
   }
   rocksdb::Options options;
   options.create_if_missing = false;
@@ -235,17 +250,23 @@ void Store::Flush() {
   }
 }
 
-int64_t Store::ImportPoints(uint32_t ds, const Points& points, const Config& config) {
+int64_t Store::ImportPoints(uint32_t ds, const Points& points, const Config& config,
+                            MetaStorage storage) {
   if (points.size() == 0) return 0;
   DatasetInfo info;
   info.ds = ds;
   info.config = config;
+  info.storage = storage;
   info.first_ts = points.ts.front();
   info.last_ts = points.ts.back();
   info.n_points = static_cast<int64_t>(points.size());
 
-  size_t offset = 0;
-  WriteBatchOfPoints(ds, points, &offset, config, &info);
+  if (storage == MetaStorage::kTableProperties) {
+    ImportPointsToTableProperties(ds, points, config, &info);
+  } else {
+    size_t offset = 0;
+    WriteBatchOfPoints(ds, points, &offset, config, &info);
+  }
 
   rocksdb::WriteOptions write_options;
   const rocksdb::Status status =
@@ -319,7 +340,7 @@ void Store::WriteBatchOfPoints(uint32_t ds, const Points& points, size_t* offset
 }
 
 int64_t Store::ImportCsv(uint32_t ds, const std::string& csv_path, const Config& config,
-                         bool skip_header) {
+                         bool skip_header, MetaStorage storage) {
   std::ifstream input(csv_path);
   if (!input) throw AlgorithmError("cannot open CSV: " + csv_path);
 
@@ -341,7 +362,7 @@ int64_t Store::ImportCsv(uint32_t ds, const std::string& csv_path, const Config&
     ++row;
   }
   if (points.size() == 0) throw AlgorithmError("CSV contains no points: " + csv_path);
-  return ImportPoints(ds, points, config);
+  return ImportPoints(ds, points, config, storage);
 }
 
 DatasetInfo Store::Describe(uint32_t ds) const {
@@ -564,6 +585,9 @@ QueryResult Store::MShapeRaw(const QueryOptions& options) {
 QueryResult Store::KShape(const QueryOptions& options) {
   const DatasetInfo info = Describe(options.ds);
   const Config config = ResolveConfig(options, info);
+  if (info.storage == MetaStorage::kTableProperties) {
+    return QueryFromProperties(options, config, false);
+  }
 
   std::vector<PageRef> pages;
   int64_t meta_bytes = 0;
@@ -601,6 +625,9 @@ QueryResult Store::KShape(const QueryOptions& options) {
 QueryResult Store::MShape(const QueryOptions& options) {
   const DatasetInfo info = Describe(options.ds);
   const Config config = ResolveConfig(options, info);
+  if (info.storage == MetaStorage::kTableProperties) {
+    return QueryFromProperties(options, config, true);
+  }
 
   std::vector<PageRef> pages;
   std::vector<int64_t> page_numbers = PagesCovering(options.ds, options.t0, options.t1);

@@ -1,4 +1,4 @@
-# In-database time-series clustering on RocksDB
+﻿# In-database time-series clustering on RocksDB
 
 Implementation of the in-database K-Shape / Medoid-Shape clustering pipeline on
 RocksDB, ported from the IoTDB reference implementation
@@ -81,6 +81,41 @@ the page header: per cluster summed outer products (`k*l*l` doubles),
 centroids, deltas, membership labels, the approximate `edK` model, and the
 head/tail partial subsequences that let adjacent pages be stitched together.
 
+## Storage modes
+
+The precomputed clustering metadata can live in two places, selected at import
+time with `--meta-storage`:
+
+| Mode | Where the metadata lives | CLI |
+|---|---|---|
+| `cf` (default) | a dedicated column family, one key per page | `--meta-storage cf` |
+| `props` | inside the SST that holds the data points, in the table properties meta block | `--meta-storage props` |
+
+`props` is the layout described in the paper: a `TablePropertiesCollector`
+observes every key as the table is built, and at `Finish()` it stores the page
+records for the time range that file covers under one user collected property
+(`indb.page_stats`). The records therefore sit in the same file as the points
+they describe. Import flushes once per logical chunk, so one SST carries
+exactly one chunk. No RocksDB source change is involved: the mechanism is the
+public table properties extension point.
+
+Queries in `props` mode call `GetPropertiesOfTablesInRange`, which visits only
+the files overlapping the requested key range, so the reported
+`meta_bytes_read` is the metadata actually touched by that query.
+
+Both modes run the same kernel on the same page records and produce bit
+identical centres; `indb_tests` asserts this. Measured on the Air series
+(714962 points, k=3, l=166, 10240 points per page, 8 pages per chunk):
+
+| | `cf` | `props` |
+|---|---:|---:|
+| import | 43.5 s | 43.4 s |
+| database size | 65.3 MB | 59.5 MB |
+| `kshape` page | 0.362 s | 0.286 s |
+| `kshape` chunk | 0.269 s | 0.268 s |
+
+`props` is smaller because chunk aggregates are derived from the page records
+at query time instead of being stored a second time.
 ## Query semantics
 
 - Subsequences are aligned to the absolute grid `[i*l, (i+1)*l)`.

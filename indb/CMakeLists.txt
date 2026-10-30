@@ -1,4 +1,4 @@
-#  Copyright (c) 2026 The in-database time-series clustering authors.
+﻿#  Copyright (c) 2026 The in-database time-series clustering authors.
 #  This source code is licensed under both the GPLv2 (found in the
 #  COPYING file in the root directory) and Apache 2.0 License
 #  (found in the LICENSE.Apache file in the root directory).
@@ -37,7 +37,7 @@ add_library(indb_core STATIC
 )
 target_include_directories(indb_core PUBLIC core/include)
 
-add_library(indb_store STATIC rocksdb/store.cpp)
+add_library(indb_store STATIC rocksdb/store.cpp rocksdb/store_props.cpp rocksdb/stats_props.cpp)
 target_include_directories(indb_store PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${ROCKSDB_INCLUDE_DIR})
 target_link_libraries(indb_store PUBLIC indb_core ${ROCKSDB_LIBRARY})
 

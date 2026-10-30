@@ -31,7 +31,7 @@ void PrintUsage() {
       "\n"
       "Commands:\n"
       "  import   --db PATH --ds N --csv FILE --k K --l L [--edk N] [--r X]\n"
-      "           [--page-points N] [--chunk-pages N] [--iter-build N] [--header]\n"
+      "           [--page-points N] [--chunk-pages N] [--iter-build N] [--meta-storage cf|props] [--header]\n"
       "  info     --db PATH\n"
       "  query    --db PATH --ds N --t0 T --t1 T --method M [--level page|chunk]\n"
       "           [--k K] [--l L] [--repeat N] [--out FILE]\n"
@@ -87,6 +87,7 @@ int RunImport(int argc, char** argv) {
   Config config;
   int ds = 0;
   bool header = false;
+  indb::MetaStorage storage = indb::MetaStorage::kColumnFamily;
 
   for (int i = 2; i < argc; ++i) {
     const std::string flag = argv[i];
@@ -103,6 +104,10 @@ int RunImport(int argc, char** argv) {
     else if (flag == "--iter-build" && NextValue(argc, argv, &i, &value)) config.iter_build = ParseInt(value);
     else if (flag == "--seed" && NextValue(argc, argv, &i, &value)) config.seed = std::stoull(value);
     else if (flag == "--header") header = true;
+    else if (flag == "--meta-storage" && NextValue(argc, argv, &i, &value)) {
+      storage = (value == "props") ? indb::MetaStorage::kTableProperties
+                                   : indb::MetaStorage::kColumnFamily;
+    }
     else {
       std::fprintf(stderr, "unknown option: %s\n", flag.c_str());
       return 2;
@@ -115,7 +120,7 @@ int RunImport(int argc, char** argv) {
 
   const auto begin = std::chrono::steady_clock::now();
   std::unique_ptr<Store> store = Store::Create(db_path);
-  const int64_t points = store->ImportCsv(static_cast<uint32_t>(ds), csv, config, header);
+  const int64_t points = store->ImportCsv(static_cast<uint32_t>(ds), csv, config, header, storage);
   store->Flush();
   const auto end = std::chrono::steady_clock::now();
   const double seconds = std::chrono::duration<double>(end - begin).count();

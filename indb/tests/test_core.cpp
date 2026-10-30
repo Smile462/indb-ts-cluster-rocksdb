@@ -1,4 +1,4 @@
-//  Copyright (c) 2026 The in-database time-series clustering authors.
+﻿//  Copyright (c) 2026 The in-database time-series clustering authors.
 //  This source code is licensed under both the GPLv2 (found in the
 //  COPYING file in the root directory) and Apache 2.0 License
 //  (found in the LICENSE.Apache file in the root directory).
@@ -126,7 +126,7 @@ void TestStoreEndToEnd() {
   const indb::Points points = MakeSeries(1920, config.l);
   {
     std::unique_ptr<indb::Store> store = indb::Store::Create(db_path.string());
-    const int64_t written = store->ImportPoints(7, points, config);
+    const int64_t written = store->ImportPoints(7, points, config, indb::MetaStorage::kColumnFamily);
     Check(written == 1920, "imported point count");
     store->Flush();
   }
@@ -200,6 +200,76 @@ void TestStoreEndToEnd() {
   std::filesystem::remove_all(db_path);
 }
 
+// The two storage modes must produce identical centres: the metadata lives in
+// a different place, the arithmetic is the same.
+void TestPropertyStorageParity() {
+  const std::filesystem::path cf_path = "E:/tmp/indb_test_cf";
+  const std::filesystem::path props_path = "E:/tmp/indb_test_props";
+  std::filesystem::remove_all(cf_path);
+  std::filesystem::remove_all(props_path);
+
+  indb::Config config;
+  config.k = 2;
+  config.l = 16;
+  config.iter_build = 10;
+  config.iter_raw = 10;
+  config.page_points = 240;
+  config.chunk_pages = 3;
+
+  const indb::Points points = MakeSeries(1920, config.l);
+
+  indb::QueryOptions options;
+  options.ds = 7;
+  options.t0 = 0;
+  options.t1 = 1919;
+
+  indb::QueryResult cf_page;
+  indb::QueryResult cf_chunk;
+  indb::QueryResult props_page;
+  indb::QueryResult props_chunk;
+
+  {
+    std::unique_ptr<indb::Store> store = indb::Store::Create(cf_path.string());
+    store->ImportPoints(7, points, config, indb::MetaStorage::kColumnFamily);
+    store->Flush();
+    cf_page = store->KShape(options);
+    options.level = indb::Level::Chunk;
+    cf_chunk = store->KShape(options);
+    options.level = indb::Level::Page;
+  }
+  {
+    std::unique_ptr<indb::Store> store = indb::Store::Create(props_path.string());
+    store->ImportPoints(7, points, config, indb::MetaStorage::kTableProperties);
+    store->Flush();
+    props_page = store->KShape(options);
+    options.level = indb::Level::Chunk;
+    props_chunk = store->KShape(options);
+    options.level = indb::Level::Page;
+  }
+
+  Check(cf_page.centers.size() == 2, "column family page centers");
+  Check(props_page.centers.size() == 2, "properties page centers");
+  Check(cf_chunk.centers.size() == 2, "column family chunk centers");
+  Check(props_chunk.centers.size() == 2, "properties chunk centers");
+
+  auto worst_difference = [](const indb::QueryResult& left, const indb::QueryResult& right) {
+    double worst = 0.0;
+    for (size_t i = 0; i < left.centers.size() && i < right.centers.size(); ++i) {
+      for (size_t j = 0; j < left.centers[i].size() && j < right.centers[i].size(); ++j) {
+        worst = std::max(worst, std::fabs(left.centers[i][j] - right.centers[i][j]));
+      }
+    }
+    return worst;
+  };
+
+  Check(worst_difference(cf_page, props_page) == 0.0, "page level parity across storage modes");
+  Check(worst_difference(cf_chunk, props_chunk) == 0.0, "chunk level parity across storage modes");
+  Check(props_page.stats.meta_bytes_read > 0, "properties mode reports metadata bytes");
+  Check(props_page.stats.pages_meta_used > 0, "properties mode used page records");
+
+  std::filesystem::remove_all(cf_path);
+  std::filesystem::remove_all(props_path);
+}
 }  // namespace
 
 int main() {
@@ -211,7 +281,7 @@ int main() {
   };
   const Case cases[] = {
       {"zscore", TestZScore}, {"fft", TestFft},   {"eigen", TestEigen},
-      {"meta", TestMetaRoundTrip}, {"store", TestStoreEndToEnd},
+      {"meta", TestMetaRoundTrip}, {"store", TestStoreEndToEnd}, {"props", TestPropertyStorageParity},
   };
   for (const Case& item : cases) {
     std::printf("[ RUN  ] %s\n", item.name);

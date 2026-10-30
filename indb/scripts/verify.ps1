@@ -197,6 +197,32 @@ Check 'rocksdb partial range corrects pages' ((Get-RdbStat $partial.Stderr 'page
 Check 'rocksdb partial range reads only edge pages' ((Get-RdbStat $partial.Stderr 'raw_points') -lt $Points)
 
 # ---------------------------------------------------------------------------
+Section 'Stage 2b: metadata stored in the SST table properties'
+
+$propsDir = Join-Path $WorkDir 'rdb_props'
+if (Test-Path $propsDir) { Remove-Item $propsDir -Recurse -Force }
+$importProps = Invoke-Rdb @('import', '--db', $propsDir, '--ds', '1', '--csv', $csv,
+                            '--k', "$K", '--l', "$L", '--page-points', "$PagePoints",
+                            '--chunk-pages', "$ChunkPages", '--iter-build', "$IterBuild",
+                            '--seed', "$Seed", '--meta-storage', 'props')
+Check 'properties mode import succeeded' ($importProps.Code -eq 0)
+
+foreach ($modeCase in @(@{ name = 'kshape'; extra = @() },
+                        @{ name = 'kshape_chunk'; extra = @('--level', 'chunk') })) {
+  $outFile = Join-Path $WorkDir ("props_{0}.txt" -f $modeCase.name)
+  $run = Invoke-Rdb (@('query', '--db', $propsDir, '--ds', '1', '--t0', '0',
+                       '--t1', "$($Points - 1)", '--method', 'kshape', '--out', $outFile) + $modeCase.extra)
+  Check ("properties {0} exit 0" -f $modeCase.name) ($run.Code -eq 0)
+  $values = Read-Doubles -Path $outFile -Skip 1
+  Check ("properties {0} returns k*l" -f $modeCase.name) ($values.Count -eq ($K * $L))
+  $diff = Max-AbsDiff $rdbResults[$modeCase.name] $values
+  Check ("{0} identical across storage modes" -f $modeCase.name) ($diff -eq 0.0) `
+        -Detail ("maxdiff={0:E3}" -f $diff)
+  Check ("properties {0} reads no raw points" -f $modeCase.name) `
+        ((Get-RdbStat $run.Stderr 'raw_points') -eq 0)
+}
+
+# ---------------------------------------------------------------------------
 $pgResults = @{}
 $pgStats = @{}
 if (-not $SkipPg) {

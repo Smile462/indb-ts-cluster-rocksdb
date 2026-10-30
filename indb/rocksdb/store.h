@@ -1,4 +1,4 @@
-//  Copyright (c) 2026 The in-database time-series clustering authors.
+﻿//  Copyright (c) 2026 The in-database time-series clustering authors.
 //  This source code is licensed under both the GPLv2 (found in the
 //  COPYING file in the root directory) and Apache 2.0 License
 //  (found in the LICENSE.Apache file in the root directory).
@@ -20,12 +20,28 @@
 
 namespace indb {
 
+class PageMetaRegistry;
+
+// Where the precomputed clustering metadata lives.
+//
+// kColumnFamily    - a dedicated column family, one key per page. This mirrors
+//                    the IoTDB implementation, which keeps page statistics in
+//                    a separate region of the file.
+// kTableProperties - inside the SST that holds the data points, in the meta
+//                    block RocksDB writes for table properties. This is the
+//                    layout the paper describes.
+enum class MetaStorage : int32_t {
+  kColumnFamily = 0,
+  kTableProperties = 1,
+};
+
 // Persisted description of one series. The parameters are stored with the
 // data so a query with different k/l/edk is rejected instead of silently
 // misreading metadata produced under other settings.
 struct DatasetInfo {
   uint32_t ds = 0;
-  int32_t version = 1;
+  int32_t version = 2;
+  MetaStorage storage = MetaStorage::kColumnFamily;
   Config config;
   int64_t first_ts = 0;
   int64_t last_ts = 0;
@@ -65,10 +81,11 @@ class Store {
   // accepted as well, in which case the timestamp is the row number. Returns
   // the number of points written.
   int64_t ImportCsv(uint32_t ds, const std::string& csv_path, const Config& config,
-                    bool skip_header);
+                    bool skip_header, MetaStorage storage);
 
   // Persists a synthetic series directly, used by tests.
-  int64_t ImportPoints(uint32_t ds, const Points& points, const Config& config);
+  int64_t ImportPoints(uint32_t ds, const Points& points, const Config& config,
+                       MetaStorage storage);
 
   void Flush();
 
@@ -86,10 +103,13 @@ class Store {
 
   rocksdb::ColumnFamilyHandle* cf_for(const std::string& name);
 
-  // Writes one page worth of points and its metadata. Returns false when the
-  // series is exhausted.
   void WriteBatchOfPoints(uint32_t ds, const Points& points, size_t* offset,
                           const Config& config, DatasetInfo* info);
+
+  // Writes points only, registering each page record for the properties
+  // collector, and flushes once per chunk so one SST holds one chunk.
+  void ImportPointsToTableProperties(uint32_t ds, const Points& points, const Config& config,
+                                     DatasetInfo* info);
 
   Points ReadRange(uint32_t ds, int64_t t0, int64_t t1) const;
   Points ReadPage(uint32_t ds, int64_t page_no) const;
@@ -105,10 +125,22 @@ class Store {
   };
   ChunkRecord ReadChunkMeta(uint32_t ds, int64_t chunk_no, int64_t* bytes) const;
 
+  // Page records read out of the SST meta blocks, grouped by file.
+  struct SstGroup {
+    std::vector<PageMeta> pages;
+    int64_t t_start = 0;
+    int64_t t_end = 0;
+  };
+  std::vector<SstGroup> LoadPropertyGroups(uint32_t ds, int64_t t0, int64_t t1, int64_t* bytes) const;
+
+  // Query path used when the dataset stores its metadata in table properties.
+  QueryResult QueryFromProperties(const QueryOptions& options, const Config& config, bool medoid);
+
   Config ResolveConfig(const QueryOptions& options, const DatasetInfo& info) const;
 
   std::unique_ptr<rocksdb::DB> db_;
   std::vector<rocksdb::ColumnFamilyHandle*> handles_;
+  std::shared_ptr<PageMetaRegistry> registry_;
 };
 
 }  // namespace indb

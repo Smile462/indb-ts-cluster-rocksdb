@@ -94,6 +94,7 @@ SELECT indb_tsc_kshape(1, 0, 19999, 'page');
 | 两平台逐位一致 | `kshape` page、`kshape` chunk、`kshape_raw`、`mshape_raw` 最大绝对差 = 0 |
 | 全区间不修正 | `pages_corrected = 0`，`raw_points = 0` |
 | 块级确实用块 | `chunks_meta = 3`，`pages_meta = 0` |
+| 两种存储模式一致 | `--meta-storage cf` 与 `--meta-storage props` 的 page / chunk 结果逐位相同 |
 
 > `mshape`（预计算版）两边抽样流不同，只做统计性比较，不要求逐位相同。
 
@@ -220,6 +221,15 @@ SELECT indb_tsc_build(1, 3, 166, 10240, 8, 30, 24301);
 | `kshape_raw` | 7.370 s | 7.186 s |
 | `mshape_raw` | 0.595 s | 576 ms |
 | 库体积 | 66.1 MB | — |
+
+另外用 Air 对比了两种 RocksDB 存储布局（`cf` 与 `props`），结果逐位相同：
+
+| Air（714962 点） | `cf` | `props` |
+|---|---:|---:|
+| 导入 | 43.5 s | 43.4 s |
+| 库体积 | 65.3 MB | 59.5 MB |
+| `kshape` page | 0.362 s | 0.286 s |
+| `kshape` chunk | 0.269 s | 0.268 s |
 
 一致性：
 
