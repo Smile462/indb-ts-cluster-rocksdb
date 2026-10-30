@@ -203,16 +203,19 @@ int RunQuery(int argc, char** argv) {
   }
   const auto end = std::chrono::steady_clock::now();
   const double openSeconds = std::chrono::duration<double>(openEnd - openBegin).count();
-  const double querySeconds = std::chrono::duration<double>(end - begin).count() / repeat;
-  const double totalSeconds = openSeconds + querySeconds;
+  const double queryTotal = std::chrono::duration<double>(end - begin).count();
+  const double queryMean = queryTotal / repeat;
+  const double totalSeconds = openSeconds + queryTotal;
 
-  // Opening a database can read table properties (all files are opened when
-  // max_open_files is unlimited), so the open and query phases are reported
-  // separately instead of folded into one number.
+  // Opening a database can touch table metadata, so the open and query phases
+  // are reported separately instead of folded into one number. With repeat > 1
+  // the whole query phase is the meaningful total; the mean is only the per
+  // iteration cost.
   std::fprintf(stderr,
-               "method=%s level=%s centers=%zu open=%.6f s query=%.6f s total=%.6f s\n",
-               method.c_str(), level.c_str(), result.centers.size(), openSeconds, querySeconds,
-               totalSeconds);
+               "method=%s level=%s centers=%zu repeat=%d open=%.6f s query_total=%.6f s "
+               "query_mean=%.6f s total=%.6f s\n",
+               method.c_str(), level.c_str(), result.centers.size(), repeat, openSeconds,
+               queryTotal, queryMean, totalSeconds);
   PrintStats(result);
   PrintCenters(result, out);
   return 0;

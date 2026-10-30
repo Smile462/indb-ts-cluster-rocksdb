@@ -99,6 +99,14 @@ class Store {
   QueryResult KShape(const QueryOptions& options);
   QueryResult MShape(const QueryOptions& options);
 
+  // Test hook: the sampling policy is part of the algorithm contract, so it is
+  // covered directly instead of only through the final centres.
+  std::vector<Vec> SampleCandidatesForTest(const std::vector<PageMeta>& pages, int64_t t0,
+                                           int64_t t1, const Config& config,
+                                           const std::function<Points(const PageMeta&)>& loader) {
+    QueryStats ignored;
+    return SampleCandidates(pages, t0, t1, config, loader, &ignored);
+  }
  private:
   Store();
 
@@ -141,6 +149,7 @@ class Store {
                                     const Config& config,
                                     const std::function<Points(const PageMeta&)>& loader,
                                     QueryStats* stats) const;
+
 
   // Query path used when the dataset stores its metadata in table properties.
   QueryResult QueryFromProperties(const QueryOptions& options, const Config& config, bool medoid);

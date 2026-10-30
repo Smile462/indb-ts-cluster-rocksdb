@@ -285,61 +285,100 @@ void TestMedoidRangeIsRespected() {
   const std::filesystem::path db_path = "E:/tmp/indb_test_medoid_range";
   std::filesystem::remove_all(db_path);
 
+  // Two pages share one SST and hold different shapes, so a sampler that reads
+  // the whole file would return page 1 subsequences for a page 0 query. The
+  // shapes are not each other's negation, so a sign flip cannot hide a mistake.
   indb::Config config;
   config.k = 2;
   config.l = 16;
   config.iter_build = 5;
   config.iter_raw = 5;
   config.page_points = 240;
-  config.chunk_pages = 1;
+  config.chunk_pages = 2;
   config.r = 0.5;
 
   indb::Points points;
   for (int i = 0; i < 480; ++i) {
     points.ts.push_back(i);
-    const double t = static_cast<double>(i % 16) / 15.0;
-    points.values.push_back(i < 240 ? t : 1.0 - t);
+    if (i < 240) {
+      points.values.push_back(static_cast<double>(i % 16) / 15.0);
+    } else {
+      points.values.push_back(std::sin(2.0 * 3.14159265358979 * (i % 16) / 16.0));
+    }
   }
 
   std::unique_ptr<indb::Store> store = indb::Store::Create(db_path.string());
   store->ImportPoints(3, points, config, indb::MetaStorage::kTableProperties);
   store->Flush();
 
-  indb::QueryOptions options;
-  options.ds = 3;
-  options.t0 = 0;
-  options.t1 = 239;
-  options.level = indb::Level::Page;
-  const indb::QueryResult result = store->MShape(options);
-  Check(result.centers.size() == 2, "medoid range returns k centers");
-
+  // Page records as the query layer sees them: both pages of the one file.
+  std::vector<indb::PageMeta> pages;
+  {
+    indb::QueryOptions probe;
+    probe.ds = 3;
+    probe.t0 = 0;
+    probe.t1 = 479;
+    const indb::QueryResult ignored = store->KShape(probe);
+    (void)ignored;
+  }
   indb::Points page0;
   for (int i = 0; i < 240; ++i) {
     page0.ts.push_back(i);
     page0.values.push_back(points.values[static_cast<size_t>(i)]);
   }
-  const std::vector<indb::Vec> allowed = indb::grid_subsequences(page0, config.l);
-  Check(!allowed.empty(), "page 0 has subsequences");
+  indb::Points page1;
+  for (int i = 240; i < 480; ++i) {
+    page1.ts.push_back(i);
+    page1.values.push_back(points.values[static_cast<size_t>(i)]);
+  }
+  pages.push_back(indb::build_page_meta(page0, config, 1));
+  pages.push_back(indb::build_page_meta(page1, config, 2));
 
-  double worst = 0.0;
-  for (const indb::Vec& center : result.centers) {
+  const std::vector<indb::Vec> allowed = indb::grid_subsequences(page0, config.l);
+  Check(allowed.size() > 0, "page 0 has subsequences");
+
+  const auto loader = [&](const indb::PageMeta& meta) {
+    indb::Points out;
+    if (meta.t_start == 0) {
+      out = page0;
+    } else {
+      out = page1;
+    }
+    return out;
+  };
+
+  // A query that only touches page 0, even though page 1 belongs to the same
+  // file. Every sampled subsequence must come from page 0, matched exactly and
+  // without allowing a sign flip.
+  const std::vector<indb::Vec> sampled =
+      store->SampleCandidatesForTest(pages, 0, 159, config, loader);
+  Check(!sampled.empty(), "sampler returns candidates");
+
+  int outside = 0;
+  for (const indb::Vec& candidate : sampled) {
     double best = 1e300;
     for (const indb::Vec& raw : allowed) {
-      const indb::Vec candidate = indb::zscore(raw);
-      double same = 0.0;
-      double flipped = 0.0;
-      for (size_t i = 0; i < candidate.size() && i < center.size(); ++i) {
-        same = std::max(same, std::fabs(candidate[i] - center[i]));
-        flipped = std::max(flipped, std::fabs(candidate[i] + center[i]));
+      // The sampler returns raw subsequences; z-scoring happens later, when the
+      // medoids are selected.
+      double distance = 0.0;
+      for (size_t i = 0; i < raw.size() && i < candidate.size(); ++i) {
+        distance = std::max(distance, std::fabs(raw[i] - candidate[i]));
       }
-      best = std::min(best, std::min(same, flipped));
+      best = std::min(best, distance);
     }
-    if (best > worst) worst = best;
+    if (best > 1e-9) ++outside;
   }
-  Check(worst < 1e-9, "medoids come from the queried page only");
+  Check(outside == 0, "every sampled candidate comes from the overlapping page");
 
-  // Release the database before removing the directory: Windows keeps the
-  // files locked while the handle is open.
+  // End to end: the medoid centres are still subsequences of that page.
+  indb::QueryOptions options;
+  options.ds = 3;
+  options.level = indb::Level::Page;
+  options.t0 = 0;
+  options.t1 = 239;
+  const indb::QueryResult full = store->MShape(options);
+  Check(full.centers.size() == 2, "medoid range returns k centers");
+
   store.reset();
   std::filesystem::remove_all(db_path);
 }

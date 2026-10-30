@@ -122,8 +122,13 @@ at query time instead of being stored a second time.
 Open and query time are reported separately on purpose. Opening a database can
 touch table metadata, so folding it into one number would hide where the time
 went. The `query` figures are the time from the first call to the last, on an
-already opened database; the CLI prints `open`, `query` and `total` for every
-run.
+already opened database; the CLI prints `open`, `query_total`, `query_mean` and
+`total` for every run.
+
+The split is a reporting boundary, not a claim about where the I/O happens: the
+operating system page cache and the size of the metadata both influence it, so
+the timings alone cannot prove whether the properties block was read while
+opening. Settling that needs RocksDB I/O counters, not millisecond arithmetic.
 
 Layout is frozen: automatic compaction is disabled at creation and queries open
 the database read only. No file is ever rewritten, so the mapping from files to

@@ -73,6 +73,29 @@ straddle a query boundary.
    identities, with a bounded retry, instead of relying on Java reference
    equality.
 
+## Medoid candidate sampling scope
+
+The reference implementation samples chunks by duration, then walks the pages of
+each selected chunk and slices subsequences from the **whole page**; the page data
+is read without a time filter. Candidates therefore routinely start before or
+after the query range.
+
+This port does the same at page granularity: candidates come from every page that
+overlaps the query range, again sliced from the page's full contents. The only
+difference is which pages are eligible. The reference selects chunks and then
+takes all of their pages, so it can include pages that do not overlap the query
+at all; this port selects the pages that overlap. Neither clips subsequences to
+the exact query bounds.
+
+That is deliberate. Clipping to the exact range would change the candidate set the
+algorithm defines and would make this port disagree with the reference. The
+K-Shape aggregation path still corrects partially covered pages exactly, because
+that is a different part of the algorithm: aggregation uses page statistics,
+while medoid selection uses raw subsequences.
+
+`0.8` remains the page and chunk coverage threshold that decides whether a
+partially covered page is reused as is or corrected. That is the journal
+version's behaviour and is not a defect.
 ## Known consequences
 
 - Results on fully covered ranges should track IoTDB closely; results on
