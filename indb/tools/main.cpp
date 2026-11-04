@@ -1,4 +1,5 @@
-﻿//  Copyright (c) 2026 The in-database time-series clustering authors.
+﻿#include "indb/journal_profile.h"
+//  Copyright (c) 2026 The in-database time-series clustering authors.
 //  This source code is licensed under both the GPLv2 (found in the
 //  COPYING file in the root directory) and Apache 2.0 License
 //  (found in the LICENSE.Apache file in the root directory).
@@ -124,7 +125,7 @@ int RunImport(int argc, char** argv) {
   store->Flush();
   const auto end = std::chrono::steady_clock::now();
   const double seconds = std::chrono::duration<double>(end - begin).count();
-  std::printf("imported %lld points in %.3f s\n", static_cast<long long>(points), seconds);
+  std::printf("imported %lld points in %.9f s\n", static_cast<long long>(points), seconds);
   return 0;
 }
 
@@ -145,6 +146,7 @@ int RunInfo(int argc, char** argv) {
                 static_cast<long long>(info.n_points), static_cast<long long>(info.n_pages),
                 static_cast<long long>(info.n_chunks), static_cast<long long>(info.first_ts),
                 static_cast<long long>(info.last_ts));
+    std::printf("JOURNAL_STORAGE:%s\n",store->JournalStorageInfo(info.ds).c_str());
   }
   return 0;
 }
@@ -170,6 +172,10 @@ int RunQuery(int argc, char** argv) {
     else if (flag == "--l" && NextValue(argc, argv, &i, &value)) options.l = ParseInt(value);
     else if (flag == "--edk" && NextValue(argc, argv, &i, &value)) options.edk = ParseInt(value);
     else if (flag == "--repeat" && NextValue(argc, argv, &i, &value)) repeat = ParseInt(value);
+    else if (flag == "--theta-page" && NextValue(argc, argv, &i, &value)) options.theta_page = std::stod(value);
+    else if (flag == "--theta-chunk" && NextValue(argc, argv, &i, &value)) options.theta_chunk = std::stod(value);
+    else if (flag == "--query-seed" && NextValue(argc, argv, &i, &value)) options.query_seed = std::stoull(value);
+    else if (flag == "--ablation" && NextValue(argc, argv, &i, &value)) options.ablation = value;
     else if (flag == "--out" && NextValue(argc, argv, &i, &value)) out = value;
     else {
       std::fprintf(stderr, "unknown option: %s\n", flag.c_str());
@@ -185,6 +191,7 @@ int RunQuery(int argc, char** argv) {
   const auto openBegin = std::chrono::steady_clock::now();
   std::unique_ptr<Store> store = Store::Open(db_path);
   const auto openEnd = std::chrono::steady_clock::now();
+  JournalQueryMemory journal_memory(std::getenv("JOURNAL_PROFILE_QUERY")!=nullptr);
   QueryResult result;
   const auto begin = std::chrono::steady_clock::now();
   for (int i = 0; i < repeat; ++i) {
@@ -216,7 +223,9 @@ int RunQuery(int argc, char** argv) {
                "query_mean=%.6f s total=%.6f s\n",
                method.c_str(), level.c_str(), result.centers.size(), repeat, openSeconds,
                queryTotal, queryMean, totalSeconds);
+  std::fprintf(stderr,"JOURNAL_QUERY_MEMORY:%s\n",journal_memory.Json().c_str());
   PrintStats(result);
+  std::fprintf(stderr,"represented_subsequences=%lld candidate_count=%lld candidate_hash=%016llx\n",static_cast<long long>(result.stats.represented_subsequences),static_cast<long long>(result.stats.candidate_count),static_cast<unsigned long long>(result.stats.candidate_hash));
   PrintCenters(result, out);
   return 0;
 }

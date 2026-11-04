@@ -62,6 +62,9 @@ struct QueryOptions {
   int l = 0;
   int edk = 0;
   double r = 0.2;
+  double theta_page = 0.8, theta_chunk = 0.8;
+  uint64_t query_seed = 24301;
+  std::string ablation = "normal";
   int page_points = 0;   // 0 => use the value recorded in the catalog
   int chunk_pages = 0;   // 0 => use the value recorded in the catalog
   Level level = Level::Page;
@@ -91,6 +94,7 @@ class Store {
   void Flush();
 
   DatasetInfo Describe(uint32_t ds) const;
+  std::string JournalStorageInfo(uint32_t ds) const;
   std::vector<DatasetInfo> ListDatasets() const;
 
   // The four query entry points.

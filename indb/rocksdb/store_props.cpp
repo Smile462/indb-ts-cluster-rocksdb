@@ -1,4 +1,8 @@
-﻿//  Copyright (c) 2026 The in-database time-series clustering authors.
+﻿#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <cmath>
+//  Copyright (c) 2026 The in-database time-series clustering authors.
 //  This source code is licensed under both the GPLv2 (found in the
 //  COPYING file in the root directory) and Apache 2.0 License
 //  (found in the LICENSE.Apache file in the root directory).
@@ -47,6 +51,10 @@ void Store::ImportPointsToTableProperties(uint32_t ds, const Points& points, con
   rocksdb::ColumnFamilyHandle* cf_points = cf_for("points");
   rocksdb::WriteOptions write_options;
 
+  const char* mode=std::getenv("JOURNAL_STORAGE_STATE");
+  const bool raw_only=mode && std::string(mode)=="S0";
+  const bool page_only=mode && std::string(mode)=="SP";
+  double page_seconds=0,chunk_seconds=0,flush_seconds=0;
   const size_t total = points.size();
   size_t offset = 0;
   int64_t page_no = 0;
@@ -67,15 +75,24 @@ void Store::ImportPointsToTableProperties(uint32_t ds, const Points& points, con
     const rocksdb::Status status = db_->Write(write_options, &batch);
     if (!status.ok()) throw AlgorithmError("point write failed: " + status.ToString());
 
+    if(!raw_only) {
     Points page;
     page.ts.assign(points.ts.begin() + begin, points.ts.begin() + end);
     page.values.assign(points.values.begin() + begin, points.values.begin() + end);
 
     const uint64_t page_seed =
         config.seed ^ (static_cast<uint64_t>(page_no + 1) * 0x9E3779B97F4A7C15ULL);
+    const auto page_begin=std::chrono::steady_clock::now();
     const PageMeta meta = build_page_meta(page, config, page_seed);
+    page_seconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-page_begin).count();
     registry_->PutPage(ds, page_no, meta.t_start, meta.t_end, encode_meta(meta));
-    chunk_pages.push_back(meta);
+    if(!page_only && meta.count<config.l) {
+      const auto short_begin=std::chrono::steady_clock::now();
+      chunk_pages.push_back(build_page_meta(page,chunk_config(config),page_seed));
+      chunk_seconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-short_begin).count();
+    } else chunk_pages.push_back(meta);
+
+    }
 
     ++page_no;
     ++pages_in_chunk;
@@ -86,17 +103,23 @@ void Store::ImportPointsToTableProperties(uint32_t ds, const Points& points, con
     if (pages_in_chunk >= config.chunk_pages || offset >= total) {
       // The chunk record is stored in the same properties block as the pages it
       // summarises, so a chunk level query reads it instead of recomputing it.
-      const PageMeta chunk = build_chunk_meta(chunk_pages, config);
+      if(!raw_only && !page_only) {
+      const auto chunk_begin=std::chrono::steady_clock::now();
+      const PageMeta chunk = build_chunk_meta(chunk_pages, chunk_config(config));
+      chunk_seconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-chunk_begin).count();
       registry_->PutChunk(ds, chunk.t_start, chunk.t_end, encode_meta(chunk));
-      Flush();
+      }
+      const auto flush_begin=std::chrono::steady_clock::now();Flush();
+      flush_seconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-flush_begin).count();
       ++chunk_no;
       pages_in_chunk = 0;
       chunk_pages.clear();
     }
   }
 
-  info->n_pages = page_no;
-  info->n_chunks = chunk_no;
+  std::fprintf(stderr,"JOURNAL_BUILD page_seconds=%.9f chunk_seconds=%.9f flush_seconds=%.9f\n",page_seconds,chunk_seconds,flush_seconds);
+  info->n_pages = raw_only ? 0 : page_no;
+  info->n_chunks = (raw_only || page_only) ? 0 : chunk_no;
 }
 
 std::vector<Store::SstGroup> Store::LoadPropertyGroups(uint32_t ds, int64_t t0, int64_t t1,
@@ -137,17 +160,12 @@ std::vector<Store::SstGroup> Store::LoadPropertyGroups(uint32_t ds, int64_t t0, 
     if (pages.empty()) {
       throw AlgorithmError("table " + entry.first + " has an empty page statistics payload");
     }
-    if (!has_chunk) {
-      // A chunk record is always written with its pages, so its absence means
-      // the payload was produced by an older build or was damaged.
-      throw AlgorithmError("table " + entry.first + " carries no chunk record");
-    }
     if (bytes != nullptr) *bytes += static_cast<int64_t>(found->second.size());
 
     SstGroup group;
     group.pages = std::move(pages);
     group.chunk = std::move(chunk);
-    group.has_chunk = true;
+    group.has_chunk = has_chunk;
     group.t_start = group.pages.front().t_start;
     group.t_end = group.pages.back().t_end;
     groups.push_back(std::move(group));
@@ -193,12 +211,23 @@ QueryResult Store::QueryFromProperties(const QueryOptions& options, const Config
 
   std::vector<PageMeta> units;
 
+  auto short_chunk_page = [&](const PageMeta& meta) {
+    if(meta.count>=config.l || meta.grid_fragments)return meta;
+    const Points raw=ReadRange(options.ds,meta.t_start,meta.t_end);
+    stats.raw_points_read+=raw.size();
+    return build_page_meta(raw,chunk_config(config),config.seed);
+  };
+  auto dynamic_chunk = [&](const std::vector<PageMeta>& stored) {
+    std::vector<PageMeta> pages=stored;
+    for(auto& page:pages)if(page.count<config.l)page=short_chunk_page(page);
+    return build_chunk_meta(pages,chunk_config(config));
+  };
   auto consider_page = [&](const PageMeta& meta) {
     ++stats.pages_considered;
     const double ratio = overlap_ratio(meta, options.t0, options.t1);
     if (ratio <= 0.0) return;
     if (ratio >= config.theta_page) {
-      units.push_back(meta);
+      units.push_back(config.chunk_path && meta.count<config.l?short_chunk_page(meta):meta);
       ++stats.pages_meta_used;
       return;
     }
@@ -216,8 +245,9 @@ QueryResult Store::QueryFromProperties(const QueryOptions& options, const Config
       span.t_end = group.t_end;
       const double ratio = overlap_ratio(span, options.t0, options.t1);
       if (ratio <= 0.0) continue;
-      if (ratio >= config.theta_chunk) {
-        units.push_back(group.chunk);
+      if (ratio >= config.theta_chunk || options.ablation == "coarse") {
+        if(options.ablation!="dynamic" && !group.has_chunk)throw AlgorithmError("Persisted chunk record missing");
+        units.push_back(options.ablation == "dynamic" ? dynamic_chunk(group.pages) : group.chunk);
         ++stats.chunks_meta_used;
         continue;
       }
@@ -251,6 +281,7 @@ QueryResult Store::QueryFromProperties(const QueryOptions& options, const Config
           return ReadRange(options.ds, meta.t_start, meta.t_end);
         },
         &stats);
+    stats.candidate_count=static_cast<int64_t>(candidates.size());
     if (candidates.empty()) {
       result.stats = stats;
       return result;
@@ -258,9 +289,26 @@ QueryResult Store::QueryFromProperties(const QueryOptions& options, const Config
     result = medoid_centers(units, candidates, config);
   }
 
+  stats.represented_subsequences=result.stats.represented_subsequences;
   // Assign the counters last so the helpers above cannot reset them.
   result.stats = stats;
   return result;
+}
+
+std::string Store::JournalStorageInfo(uint32_t ds) const {
+  rocksdb::TablePropertiesCollection collection;
+  auto status=db_->GetPropertiesOfAllTables(const_cast<Store*>(this)->cf_for("points"),&collection);
+  if(!status.ok())throw AlgorithmError(status.ToString());
+  int64_t page_bytes=0,chunk_bytes=0,index_bytes=0,blob_bytes=0;
+  for(const auto& item:collection){
+    index_bytes+=item.second->index_size;
+    auto f=item.second->user_collected_properties.find(kPageStatsProperty);if(f==item.second->user_collected_properties.end())continue;
+    std::vector<PageMeta> pages;PageMeta chunk;bool has=false;std::string error;
+    if(!DecodePayload(f->second,&pages,&chunk,&has,&error))throw AlgorithmError(error);
+    blob_bytes+=f->second.size();for(const auto& page:pages)page_bytes+=encode_meta(page).size();
+    if(has)chunk_bytes+=encode_meta(chunk).size();
+  }
+  return "{\"page_payload_bytes\":"+std::to_string(page_bytes)+",\"chunk_payload_bytes\":"+std::to_string(chunk_bytes)+",\"points_table_index_bytes\":"+std::to_string(index_bytes)+",\"properties_blob_bytes\":"+std::to_string(blob_bytes)+"}";
 }
 
 }  // namespace indb

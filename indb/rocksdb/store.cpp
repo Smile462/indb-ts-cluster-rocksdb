@@ -331,7 +331,7 @@ void Store::WriteBatchOfPoints(uint32_t ds, const Points& points, size_t* offset
     const bool chunk_full = static_cast<int>(chunk_pages.size()) >= config.chunk_pages;
     const bool series_done = *offset >= total;
     if (chunk_full || series_done) {
-      const PageMeta chunk = build_chunk_meta(chunk_pages, config);
+      const PageMeta chunk = build_chunk_meta(chunk_pages, chunk_config(config));
       const int64_t page_from = page_no - static_cast<int64_t>(chunk_pages.size());
       const int64_t page_to = page_no - 1;
       rocksdb::WriteBatch chunk_batch;
@@ -610,6 +610,9 @@ std::vector<Vec> Store::SampleCandidates(const std::vector<PageMeta>& pages, int
 }
 Config Store::ResolveConfig(const QueryOptions& options, const DatasetInfo& info) const {
   Config config = info.config;
+  config.chunk_path=options.level==Level::Chunk;
+  config.theta_page = options.theta_page;
+  config.theta_chunk = options.theta_chunk;
   if (options.k > 0) config.k = options.k;
   if (options.l > 0) config.l = options.l;
   if (options.page_points > 0) config.page_points = options.page_points;
