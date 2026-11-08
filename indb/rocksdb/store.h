@@ -1,4 +1,4 @@
-﻿//  Copyright (c) 2026 The in-database time-series clustering authors.
+//  Copyright (c) 2026 The in-database time-series clustering authors.
 //  This source code is licensed under both the GPLv2 (found in the
 //  COPYING file in the root directory) and Apache 2.0 License
 //  (found in the LICENSE.Apache file in the root directory).
@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "indb/core.h"
+#include "rocksdb/stats_props.h"
 #include "rocksdb/db.h"
 #include "rocksdb/options.h"
 
@@ -140,21 +141,32 @@ class Store {
 
   // Page records read out of the SST meta blocks, grouped by file.
   struct SstGroup {
-    std::vector<PageMeta> pages;
-    PageMeta chunk;          // chunk record stored alongside its pages
+    // Owns the property strings referenced by the lightweight views.
+    std::shared_ptr<const rocksdb::TableProperties> properties;
+    std::vector<MetaRecordView> pages;
+    MetaRecordView chunk;
     bool has_chunk = false;
     int64_t t_start = 0;
     int64_t t_end = 0;
   };
   std::vector<SstGroup> LoadPropertyGroups(uint32_t ds, int64_t t0, int64_t t1, int64_t* bytes) const;
 
-  // Shared Medoid-Shape candidate sampling. Only pages overlapping [t0, t1]
-  // are considered, so a query never reads points outside its range. Both
-  // storage modes call this, so the sampling policy cannot drift apart.
+  // Shared Medoid-Shape sampling. Eligible pages overlap [t0,t1], and candidate
+  // extraction retains their original whole-page bounds in both storage modes.
   std::vector<Vec> SampleCandidates(const std::vector<PageMeta>& pages, int64_t t0, int64_t t1,
                                     const Config& config,
                                     const std::function<Points(const PageMeta&)>& loader,
                                     QueryStats* stats) const;
+
+  struct CandidatePageRange {
+    int64_t t_start;
+    int64_t t_end;
+    int64_t count;
+    size_t source_index;
+  };
+  std::vector<Vec> SampleCandidateRanges(const std::vector<CandidatePageRange>& pages,
+      int64_t t0, int64_t t1, const Config& config,
+      const std::function<Points(const CandidatePageRange&)>& loader, QueryStats* stats) const;
 
 
   // Query path used when the dataset stores its metadata in table properties.

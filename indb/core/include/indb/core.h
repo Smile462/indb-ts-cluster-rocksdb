@@ -1,4 +1,4 @@
-﻿//  Copyright (c) 2026 The in-database time-series clustering authors.
+//  Copyright (c) 2026 The in-database time-series clustering authors.
 //  This source code is licensed under both the GPLv2 (found in the
 //  COPYING file in the root directory) and Apache 2.0 License
 //  (found in the LICENSE.Apache file in the root directory).
@@ -53,6 +53,7 @@ using Vec = std::vector<double>;
 
 struct Config {
   bool chunk_path = false;
+  bool medoid_page_correction = false;
   int k = 3;                 // number of clusters
   int l = 166;               // subsequence length
   int edk = 0;               // approximate clusters for Medoid-Shape, 0 => k + 2

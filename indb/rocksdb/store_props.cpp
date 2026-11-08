@@ -1,4 +1,4 @@
-﻿#include <chrono>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cmath>
@@ -28,6 +28,21 @@
 
 namespace indb {
 namespace {
+
+#ifdef INDB_DECODE_DIAGNOSTICS
+// One-off verification build only. Ordinary experiment builds omit this probe.
+struct DecodeProbe {
+  using Clock = std::chrono::steady_clock;
+  Clock::time_point started = Clock::now();
+  int64_t pages = 0, chunks = 0, page_bytes = 0, chunk_bytes = 0;
+  double directory = 0, decode = 0, selection = 0, candidate = 0, solver = 0;
+  ~DecodeProbe() {
+    const double total = std::chrono::duration<double>(Clock::now() - started).count();
+    std::fprintf(stderr, "JOURNAL_DECODE:{\"page_decodes\":%lld,\"chunk_decodes\":%lld,\"page_decode_bytes\":%lld,\"chunk_decode_bytes\":%lld,\"directory_seconds\":%.9f,\"full_decode_seconds\":%.9f,\"selection_including_decode_seconds\":%.9f,\"candidate_seconds\":%.9f,\"solver_seconds\":%.9f,\"properties_query_seconds\":%.9f}\n",
+        static_cast<long long>(pages), static_cast<long long>(chunks), static_cast<long long>(page_bytes), static_cast<long long>(chunk_bytes), directory, decode, selection, candidate, solver, total);
+  }
+};
+#endif
 
 // Point keys are dataset (u32 big endian) followed by the sign flipped
 // timestamp (i64 big endian), so byte order matches numeric order.
@@ -150,22 +165,21 @@ std::vector<Store::SstGroup> Store::LoadPropertyGroups(uint32_t ds, int64_t t0, 
                            "dataset was probably rewritten");
     }
 
-    std::vector<PageMeta> pages;
-    PageMeta chunk;
-    bool has_chunk = false;
+    PayloadView view;
     std::string error;
-    if (!DecodePayload(found->second, &pages, &chunk, &has_chunk, &error)) {
-      throw AlgorithmError("cannot decode page statistics of table " + entry.first + ": " + error);
+    if (!IndexPayload(found->second, &view, &error)) {
+      throw AlgorithmError("cannot index page statistics of table " + entry.first + ": " + error);
     }
-    if (pages.empty()) {
+    if (view.pages.empty()) {
       throw AlgorithmError("table " + entry.first + " has an empty page statistics payload");
     }
     if (bytes != nullptr) *bytes += static_cast<int64_t>(found->second.size());
 
     SstGroup group;
-    group.pages = std::move(pages);
-    group.chunk = std::move(chunk);
-    group.has_chunk = has_chunk;
+    group.properties = entry.second;
+    group.pages = std::move(view.pages);
+    group.chunk = view.chunk;
+    group.has_chunk = view.has_chunk;
     group.t_start = group.pages.front().t_start;
     group.t_end = group.pages.back().t_end;
     groups.push_back(std::move(group));
@@ -184,7 +198,7 @@ std::vector<Store::SstGroup> Store::LoadPropertyGroups(uint32_t ds, int64_t t0, 
   bool first = true;
   int64_t previous_end = 0;
   for (const SstGroup& group : groups) {
-    for (const PageMeta& page : group.pages) {
+    for (const MetaRecordView& page : group.pages) {
       if (!first) {
         if (page.t_start <= previous_end) {
           throw AlgorithmError("overlapping page records at time " + std::to_string(page.t_start));
@@ -205,9 +219,36 @@ QueryResult Store::QueryFromProperties(const QueryOptions& options, const Config
                                        bool medoid) {
   QueryResult result;
   QueryStats stats;
+  Config page_correction_config = config;
+  page_correction_config.medoid_page_correction = medoid;
 
+#ifdef INDB_DECODE_DIAGNOSTICS
+  DecodeProbe probe;
+  const auto directory_started = DecodeProbe::Clock::now();
+#endif
   const std::vector<SstGroup> groups =
       LoadPropertyGroups(options.ds, options.t0, options.t1, &stats.metadata_payload_bytes);
+#ifdef INDB_DECODE_DIAGNOSTICS
+  probe.directory = std::chrono::duration<double>(DecodeProbe::Clock::now() - directory_started).count();
+  const auto selection_started = DecodeProbe::Clock::now();
+#endif
+
+  auto decode_record = [&](const MetaRecordView& view, bool chunk) {
+#ifdef INDB_DECODE_DIAGNOSTICS
+    const auto started = DecodeProbe::Clock::now();
+#endif
+    PageMeta meta = decode_meta(std::string(view.encoded));
+#ifdef INDB_DECODE_DIAGNOSTICS
+    probe.decode += std::chrono::duration<double>(DecodeProbe::Clock::now() - started).count();
+    if (chunk) { ++probe.chunks; probe.chunk_bytes += view.encoded.size(); }
+    else { ++probe.pages; probe.page_bytes += view.encoded.size(); }
+#endif
+    return meta;
+  };
+  auto range_ratio = [&](int64_t start, int64_t end) {
+    const int64_t left = std::max(start, options.t0), right = std::min(end, options.t1);
+    return left > right ? 0.0 : static_cast<double>(right - left + 1) / static_cast<double>(end - start + 1);
+  };
 
   std::vector<PageMeta> units;
 
@@ -217,22 +258,25 @@ QueryResult Store::QueryFromProperties(const QueryOptions& options, const Config
     stats.raw_points_read+=raw.size();
     return build_page_meta(raw,chunk_config(config),config.seed);
   };
-  auto dynamic_chunk = [&](const std::vector<PageMeta>& stored) {
-    std::vector<PageMeta> pages=stored;
+  auto dynamic_chunk = [&](const std::vector<MetaRecordView>& stored) {
+    std::vector<PageMeta> pages;
+    pages.reserve(stored.size());
+    for (const auto& view : stored) pages.push_back(decode_record(view, false));
     for(auto& page:pages)if(page.count<config.l)page=short_chunk_page(page);
     return build_chunk_meta(pages,chunk_config(config));
   };
-  auto consider_page = [&](const PageMeta& meta) {
+  auto consider_page = [&](const MetaRecordView& view) {
     ++stats.pages_considered;
-    const double ratio = overlap_ratio(meta, options.t0, options.t1);
+    const double ratio = range_ratio(view.t_start, view.t_end);
     if (ratio <= 0.0) return;
+    const PageMeta meta = decode_record(view, false);
     if (ratio >= config.theta_page) {
       units.push_back(config.chunk_path && meta.count<config.l?short_chunk_page(meta):meta);
       ++stats.pages_meta_used;
       return;
     }
     const Points raw = ReadRange(options.ds, meta.t_start, meta.t_end);
-    units.push_back(correct_page(meta, raw, options.t0, options.t1, config, &stats));
+    units.push_back(correct_page(meta, raw, options.t0, options.t1, page_correction_config, &stats));
     ++stats.pages_corrected;
   };
 
@@ -240,25 +284,26 @@ QueryResult Store::QueryFromProperties(const QueryOptions& options, const Config
     for (const SstGroup& group : groups) {
       // With the frozen layout one file holds exactly one chunk, so the chunk
       // record is derived from the pages of that file.
-      PageMeta span = group.pages.front();
-      span.t_start = group.t_start;
-      span.t_end = group.t_end;
-      const double ratio = overlap_ratio(span, options.t0, options.t1);
+      const double ratio = range_ratio(group.t_start, group.t_end);
       if (ratio <= 0.0) continue;
       if (ratio >= config.theta_chunk || options.ablation == "coarse") {
         if(options.ablation!="dynamic" && !group.has_chunk)throw AlgorithmError("Persisted chunk record missing");
-        units.push_back(options.ablation == "dynamic" ? dynamic_chunk(group.pages) : group.chunk);
+        units.push_back(options.ablation == "dynamic" ? dynamic_chunk(group.pages) : decode_record(group.chunk, true));
         ++stats.chunks_meta_used;
         continue;
       }
       ++stats.chunks_descended;
-      for (const PageMeta& meta : group.pages) consider_page(meta);
+      for (const MetaRecordView& meta : group.pages) consider_page(meta);
     }
   } else {
     for (const SstGroup& group : groups) {
-      for (const PageMeta& meta : group.pages) consider_page(meta);
+      for (const MetaRecordView& meta : group.pages) consider_page(meta);
     }
   }
+
+#ifdef INDB_DECODE_DIAGNOSTICS
+  probe.selection = std::chrono::duration<double>(DecodeProbe::Clock::now() - selection_started).count();
+#endif
 
   if (units.empty()) {
     result.stats = stats;
@@ -267,26 +312,45 @@ QueryResult Store::QueryFromProperties(const QueryOptions& options, const Config
   stats.units_merged = static_cast<int64_t>(units.size());
 
   if (!medoid) {
+#ifdef INDB_DECODE_DIAGNOSTICS
+    const auto started = DecodeProbe::Clock::now();
+#endif
     result = kshape_centers(units, config);
+#ifdef INDB_DECODE_DIAGNOSTICS
+    probe.solver = std::chrono::duration<double>(DecodeProbe::Clock::now() - started).count();
+#endif
   } else {
-    std::vector<PageMeta> all_pages;
+    std::vector<CandidatePageRange> all_pages;
     for (const SstGroup& group : groups) {
-      for (const PageMeta& meta : group.pages) all_pages.push_back(meta);
+      for (const MetaRecordView& meta : group.pages)
+        all_pages.push_back({meta.t_start, meta.t_end, meta.count, all_pages.size()});
     }
-    // SampleCandidates only considers pages that overlap the query range, so a
-    // narrow query cannot read points from the rest of the file.
-    const std::vector<Vec> candidates = SampleCandidates(
+    // Preserve candidate order/weights using only the lightweight page ranges;
+    // whole-page extraction keeps the existing candidate sampling policy.
+#ifdef INDB_DECODE_DIAGNOSTICS
+    const auto candidate_started = DecodeProbe::Clock::now();
+#endif
+    const std::vector<Vec> candidates = SampleCandidateRanges(
         all_pages, options.t0, options.t1, config,
-        [this, options](const PageMeta& meta) {
+        [this, options](const CandidatePageRange& meta) {
           return ReadRange(options.ds, meta.t_start, meta.t_end);
         },
         &stats);
+#ifdef INDB_DECODE_DIAGNOSTICS
+    probe.candidate = std::chrono::duration<double>(DecodeProbe::Clock::now() - candidate_started).count();
+#endif
     stats.candidate_count=static_cast<int64_t>(candidates.size());
     if (candidates.empty()) {
       result.stats = stats;
       return result;
     }
+#ifdef INDB_DECODE_DIAGNOSTICS
+    const auto solver_started = DecodeProbe::Clock::now();
+#endif
     result = medoid_centers(units, candidates, config);
+#ifdef INDB_DECODE_DIAGNOSTICS
+    probe.solver = std::chrono::duration<double>(DecodeProbe::Clock::now() - solver_started).count();
+#endif
   }
 
   stats.represented_subsequences=result.stats.represented_subsequences;

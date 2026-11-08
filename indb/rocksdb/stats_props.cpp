@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <initializer_list>
 
 namespace indb {
 namespace {
@@ -151,6 +152,85 @@ std::string EncodePayload(const std::vector<const PageMetaEntry*>& pages,
     out.append(*chunk_encoded);
   }
   return out;
+}
+
+namespace {
+template <typename T>
+T HeaderValue(std::string_view bytes, size_t offset) {
+  T value;
+  std::memcpy(&value, bytes.data() + offset, sizeof(T));
+  return value;
+}
+
+MetaRecordView IndexRecord(std::string_view bytes) {
+  // encode_meta has six native-endian i32s, three i64s and one flag byte,
+  // followed by fixed-size arrays whose dimensions are in that header.
+  constexpr size_t header_size = 6 * sizeof(int32_t) + 3 * sizeof(int64_t) + 1;
+  if (bytes.size() < header_size) throw AlgorithmError("truncated metadata header");
+  if (HeaderValue<uint32_t>(bytes, 0) != 0x494E444DU) throw AlgorithmError("metadata magic mismatch");
+  const int32_t version = HeaderValue<int32_t>(bytes, 4);
+  const int32_t k = HeaderValue<int32_t>(bytes, 8), l = HeaderValue<int32_t>(bytes, 12);
+  const int32_t edk = HeaderValue<int32_t>(bytes, 16), n = HeaderValue<int32_t>(bytes, 20);
+  if (version != kMetaVersion) throw AlgorithmError("unsupported metadata version " + std::to_string(version));
+  if (k <= 0 || l < 2 || edk <= 0 || n < 0) throw AlgorithmError("metadata header has invalid dimensions");
+  size_t offset = header_size;
+  // Validate every array's extent without reading its values or allocating it.
+  // Bound products before multiplying, including adversarial dimensions.
+  auto skip = [&](size_t width, std::initializer_list<size_t> dimensions) {
+    size_t elements = 1;
+    for (size_t dimension : dimensions) {
+      if (dimension != 0 && elements > (bytes.size() - offset) / width / dimension)
+        throw AlgorithmError("truncated metadata record");
+      elements *= dimension;
+    }
+    offset += elements * width;
+  };
+  const size_t ks = k, ls = l, es = edk, ns = n;
+  skip(8, {ks, ls, ls}); skip(8, {ks, ls}); skip(8, {ks}); skip(4, {ns});
+  skip(8, {es, ls}); skip(8, {es}); skip(4, {es}); skip(4, {ns});
+  skip(8, {ls}); skip(8, {ls});
+  MetaRecordView result;
+  result.t_start = HeaderValue<int64_t>(bytes, 24);
+  result.t_end = HeaderValue<int64_t>(bytes, 32);
+  result.count = HeaderValue<int64_t>(bytes, 40);
+  if (result.t_end < result.t_start || result.count < 0) throw AlgorithmError("invalid metadata time range or count");
+  result.encoded = bytes;
+  return result;
+}
+}  // namespace
+
+bool IndexPayload(const std::string& payload, PayloadView* view, std::string* error) {
+  *view = PayloadView();
+  try {
+    if (payload.size() < 5) throw AlgorithmError("page stats payload is truncated");
+    const uint8_t version = static_cast<uint8_t>(payload[0]);
+    if (version != 1 && version != kPayloadVersion) throw AlgorithmError("unsupported page stats payload version " + std::to_string(version));
+    const uint32_t count = GetU32(payload.data() + 1);
+    if (count > (payload.size() - 5) / 4) throw AlgorithmError("invalid page stats record count");
+    size_t offset = 5;
+    auto record = [&]() {
+      if (payload.size() - offset < 4) throw AlgorithmError("page stats payload is truncated at record header");
+      const uint32_t length = GetU32(payload.data() + offset);
+      offset += 4;
+      if (length > payload.size() - offset) throw AlgorithmError("page stats payload is truncated at record body");
+      const std::string_view bytes(payload.data() + offset, length);
+      offset += length;
+      return bytes;
+    };
+    view->pages.reserve(count);
+    for (uint32_t i = 0; i < count; ++i) view->pages.push_back(IndexRecord(record()));
+    if (version == 1) return true;
+    const std::string_view chunk = record();
+    if (!chunk.empty()) {
+      view->chunk = IndexRecord(chunk);
+      view->has_chunk = true;
+    }
+    return true;
+  } catch (const std::exception& failure) {
+    if (error) *error = failure.what();
+    *view = PayloadView();
+    return false;
+  }
 }
 
 bool DecodePayload(const std::string& payload, std::vector<PageMeta>* pages, PageMeta* chunk,

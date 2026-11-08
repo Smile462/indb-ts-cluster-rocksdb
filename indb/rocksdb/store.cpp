@@ -1,4 +1,4 @@
-﻿//  Copyright (c) 2026 The in-database time-series clustering authors.
+//  Copyright (c) 2026 The in-database time-series clustering authors.
 //  This source code is licensed under both the GPLv2 (found in the
 //  COPYING file in the root directory) and Apache 2.0 License
 //  (found in the LICENSE.Apache file in the root directory).
@@ -564,16 +564,26 @@ std::vector<Vec> Store::SampleCandidates(const std::vector<PageMeta>& pages, int
                                          const Config& config,
                                          const std::function<Points(const PageMeta&)>& loader,
                                          QueryStats* stats) const {
+  std::vector<CandidatePageRange> ranges;
+  ranges.reserve(pages.size());
+  for (size_t i = 0; i < pages.size(); ++i)
+    ranges.push_back({pages[i].t_start, pages[i].t_end, pages[i].count, i});
+  return SampleCandidateRanges(ranges, t0, t1, config,
+      [&](const CandidatePageRange& page) { return loader(pages[page.source_index]); }, stats);
+}
+
+std::vector<Vec> Store::SampleCandidateRanges(const std::vector<CandidatePageRange>& pages,
+    int64_t t0, int64_t t1, const Config& config,
+    const std::function<Points(const CandidatePageRange&)>& loader, QueryStats* stats) const {
   std::vector<Vec> collected;
   if (pages.empty()) return collected;
 
-  // Only pages overlapping the queried range may contribute candidates: a
-  // query must never sample points from outside its range.
-  std::vector<const PageMeta*> candidates;
+  // Preserve whole-page candidate extraction from pages overlapping Q.
+  std::vector<const CandidatePageRange*> candidates;
   std::vector<double> weights;
   double total_weight = 0.0;
-  for (const PageMeta& meta : pages) {
-    if (overlap_ratio(meta, t0, t1) <= 0.0) continue;
+  for (const CandidatePageRange& meta : pages) {
+    if (meta.t_end < meta.t_start || meta.t_end < t0 || meta.t_start > t1) continue;
     const double weight = static_cast<double>(std::max<int64_t>(1, meta.count));
     candidates.push_back(&meta);
     weights.push_back(weight);

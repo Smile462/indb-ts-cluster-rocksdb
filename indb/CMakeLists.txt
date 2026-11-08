@@ -1,4 +1,4 @@
-﻿#  Copyright (c) 2026 The in-database time-series clustering authors.
+#  Copyright (c) 2026 The in-database time-series clustering authors.
 #  This source code is licensed under both the GPLv2 (found in the
 #  COPYING file in the root directory) and Apache 2.0 License
 #  (found in the LICENSE.Apache file in the root directory).
@@ -47,6 +47,14 @@ target_link_libraries(indb_cli PRIVATE indb_store)
 add_executable(indb_tests tests/test_core.cpp)
 target_link_libraries(indb_tests PRIVATE indb_store)
 
+add_executable(indb_page_m_tests tests/mshape_page_correction.cpp)
+target_link_libraries(indb_page_m_tests PRIVATE indb_core)
+if(MSVC)
+  target_compile_options(indb_page_m_tests PRIVATE /UNDEBUG)
+else()
+  target_compile_options(indb_page_m_tests PRIVATE -UNDEBUG)
+endif()
+
 if(WIN32)
   # RocksDB's Windows port needs these system libraries.
   target_link_libraries(indb_store PUBLIC shlwapi rpcrt4)
@@ -54,3 +62,5 @@ endif()
 
 enable_testing()
 add_test(NAME core_and_store COMMAND indb_tests)
+add_test(NAME page_m_correction COMMAND indb_page_m_tests)
+set_tests_properties(core_and_store page_m_correction PROPERTIES TIMEOUT 60)

@@ -23,6 +23,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "indb/core.h"
@@ -81,6 +82,21 @@ std::string EncodePayload(const std::vector<const PageMetaEntry*>& pages,
 
 bool DecodePayload(const std::string& payload, std::vector<PageMeta>* pages, PageMeta* chunk,
                    bool* has_chunk, std::string* error);
+
+// Lightweight directory over the existing v1/v2 bytes. No clustering arrays
+// are allocated. The caller must retain the owning TableProperties object.
+struct MetaRecordView {
+  int64_t t_start = 0;
+  int64_t t_end = 0;
+  int64_t count = 0;
+  std::string_view encoded;
+};
+struct PayloadView {
+  std::vector<MetaRecordView> pages;
+  MetaRecordView chunk;
+  bool has_chunk = false;
+};
+bool IndexPayload(const std::string& payload, PayloadView* view, std::string* error);
 
 class IndbStatsCollector : public rocksdb::TablePropertiesCollector {
  public:

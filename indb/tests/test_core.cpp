@@ -1,4 +1,4 @@
-﻿//  Copyright (c) 2026 The in-database time-series clustering authors.
+//  Copyright (c) 2026 The in-database time-series clustering authors.
 //  This source code is licensed under both the GPLv2 (found in the
 //  COPYING file in the root directory) and Apache 2.0 License
 //  (found in the LICENSE.Apache file in the root directory).
@@ -135,7 +135,7 @@ indb::Points MakeSeries(int points, int l) {
 }
 
 void TestStoreEndToEnd() {
-  const std::filesystem::path db_path = "E:/tmp/indb_test_db";
+  const std::filesystem::path db_path = "indb_test_db";
   std::filesystem::remove_all(db_path);
 
   indb::Config config;
@@ -226,8 +226,8 @@ void TestStoreEndToEnd() {
 // The two storage modes must produce identical centres: the metadata lives in
 // a different place, the arithmetic is the same.
 void TestPropertyStorageParity() {
-  const std::filesystem::path cf_path = "E:/tmp/indb_test_cf";
-  const std::filesystem::path props_path = "E:/tmp/indb_test_props";
+  const std::filesystem::path cf_path = "indb_test_cf";
+  const std::filesystem::path props_path = "indb_test_props";
   std::filesystem::remove_all(cf_path);
   std::filesystem::remove_all(props_path);
 
@@ -305,7 +305,7 @@ void TestPropertyStorageParity() {
 // two pages here hold opposite shapes, so a centre drawn from page 1 would not
 // match any subsequence of page 0.
 void TestMedoidRangeIsRespected() {
-  const std::filesystem::path db_path = "E:/tmp/indb_test_medoid_range";
+  const std::filesystem::path db_path = "indb_test_medoid_range";
   std::filesystem::remove_all(db_path);
 
   // Two pages share one SST and hold different shapes, so a sampler that reads
