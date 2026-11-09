@@ -55,6 +55,24 @@ int main() {
       }
       indb::Config k_config = chunk_config;
       k_config.medoid_page_correction = false;
+      const auto actual_k = indb::correct_page(stored, raw, query.first, query.second, k_config, nullptr);
+      assert(expected.sum_matrices == actual_k.sum_matrices);
+      assert(expected.centroids == actual_k.centroids);
+      assert(expected.n_seq == actual_k.n_seq);
+      assert(actual_k.idx.size() == static_cast<size_t>(expected.n_seq));
+      for (int label : actual_k.idx) assert(label >= 0 && label < page_config.k);
+      assert(actual_k.grid_fragments);
+      assert(actual_k.t_start == query.first && actual_k.t_end == query.second);
+      assert(indb::encode_meta(stored) == original);
+      const auto decoded_k = indb::decode_meta(indb::encode_meta(actual_k));
+      assert(decoded_k.idx == actual_k.idx);
+      const auto centers = indb::kshape_centers({actual_k}, k_config);
+      assert(centers.stats.represented_subsequences == expected.n_seq);
+      assert(centers.centers.size() == static_cast<size_t>(page_config.k));
+      for (const auto& center : centers.centers) assert(indb::all_finite(center));
+      // An unusable membership payload must retain the raw recovery route.
+      auto unusable = stored;
+      unusable.idx.assign(unusable.idx.size(), -1);
       indb::Points restricted;
       for (size_t i = 0; i < raw.ts.size(); ++i) {
         if (raw.ts[i] >= query.first && raw.ts[i] <= query.second) {
@@ -62,12 +80,14 @@ int main() {
           restricted.values.push_back(raw.values[i]);
         }
       }
-      const auto expected_k = indb::build_page_meta(restricted, k_config,
-          k_config.seed ^ static_cast<uint64_t>(stored.t_start));
-      const auto actual_k = indb::correct_page(stored, raw, query.first, query.second, k_config, nullptr);
-      assert(indb::encode_meta(expected_k) == indb::encode_meta(actual_k));
+      if (!unusable.idx.empty()) {
+        const auto recovered = indb::correct_page(unusable, raw, query.first, query.second, k_config, nullptr);
+        const auto refit = indb::build_page_meta(restricted, k_config,
+            k_config.seed ^ static_cast<uint64_t>(stored.t_start));
+        assert(indb::encode_meta(recovered) == indb::encode_meta(refit));
+      }
       ++checks;
     }
   }
-  std::cout << "PASS " << checks << " native Page-M equivalence and unchanged Chunk-K cases\n";
+  std::cout << "PASS " << checks << " shared Page-K/Page-M correction and retained Chunk-K weights\n";
 }
